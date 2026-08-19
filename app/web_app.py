@@ -23,9 +23,14 @@ from app.document_service import (
     ask_document_question,
     build_download_zip,
     dataframe_csv_bytes,
+    discover_pdf_tables_by_keyword,
+    discover_pdf_tables_by_page,
     downloadable_tables,
+    extract_pdf_table_span,
+    inspect_pdf_bytes,
     process_pdf_bytes,
 )
+from app.extraction.generic_extractor import clean_generic_table
 
 
 PROFILE_LABELS = {
@@ -99,6 +104,44 @@ def _process_cached(pdf_bytes: bytes):
     return process_pdf_bytes(pdf_bytes)
 
 
+@st.cache_data(show_spinner=False, max_entries=12)
+def _inspect_cached(pdf_bytes: bytes):
+    return inspect_pdf_bytes(pdf_bytes)
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def _discover_pages_cached(
+    pdf_bytes: bytes,
+    start_page: int,
+    end_page: int,
+):
+    return discover_pdf_tables_by_page(
+        pdf_bytes,
+        start_page=start_page,
+        end_page=end_page,
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def _discover_keyword_cached(pdf_bytes: bytes, keyword: str):
+    return discover_pdf_tables_by_keyword(pdf_bytes, keyword)
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def _extract_span_cached(
+    pdf_bytes: bytes,
+    start_page: int,
+    end_page: int,
+    table_index: int,
+):
+    return extract_pdf_table_span(
+        pdf_bytes,
+        start_page=start_page,
+        end_page=end_page,
+        table_index=table_index,
+    )
+
+
 def _profile_label(profile_name: str) -> str:
     return PROFILE_LABELS.get(profile_name, profile_name.replace("_", " ").title())
 
@@ -137,19 +180,19 @@ def _render_sidebar() -> None:
     with st.sidebar:
         st.header("How it works")
         st.markdown(
-            "1. Upload a supported PDF.\n"
-            "2. The layout profile is detected automatically.\n"
-            "3. Inspect, question, and download the cleaned tables."
+            "1. Upload a PDF.\n"
+            "2. Use automatic detection, a page range, or a table title.\n"
+            "3. Preview, clean, and download the selected table."
         )
         st.divider()
-        st.subheader("Supported document families")
+        st.subheader("High-accuracy profiles")
         st.markdown(
             "- GRID-INDIA weekly electricity reports\n"
             "- IDSP weekly outbreak reports"
         )
         st.caption(
-            "A new PDF layout needs a matching profile. The app will not "
-            "silently guess an unknown layout."
+            "Other text-based PDFs can use guided extraction by page number "
+            "or table name. Scanned PDFs still require OCR."
         )
 
 
@@ -303,49 +346,10 @@ def _render_downloads_tab(result) -> None:
         )
 
 
-def main() -> None:
-    _render_sidebar()
-    st.markdown(
-        """
-        <section class="hero">
-          <div class="hero-kicker">Profile-driven PDF analysis</div>
-          <h1>Document Table Agent</h1>
-          <p>Upload a supported report, inspect the cleaned tables, ask data
-          questions, and download verified CSV outputs.</p>
-        </section>
-        """,
-        unsafe_allow_html=True,
-    )
+def _render_profile_workspace(result, document_key: str) -> None:
+    """Render the high-accuracy workflow for a known document profile."""
 
-    uploaded = st.file_uploader(
-        "Upload a PDF report",
-        type=("pdf",),
-        help=f"Maximum size: {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
-    )
-    if uploaded is None:
-        st.info(
-            "Start by uploading either a GRID-INDIA weekly report or an IDSP "
-            "weekly outbreak report."
-        )
-        return
-
-    pdf_bytes = uploaded.getvalue()
-    document_key = hashlib.sha256(pdf_bytes).hexdigest()[:16]
-    try:
-        with st.spinner("Detecting the layout and extracting tables…"):
-            result = _process_cached(pdf_bytes)
-    # This is the UI boundary: corrupt PDFs and parser-specific failures should
-    # become a useful message instead of an uncaught Streamlit exception.
-    except Exception as error:
-        st.error(f"This PDF could not be processed: {error}")
-        st.caption(
-            "If this is a new layout, add a document profile before processing it."
-        )
-        return
-
-    st.caption(f"File: {uploaded.name}")
     st.success(f"Detected profile: {_profile_label(result.profile_name)}")
-
     analysis = analysis_tables(result)
     summary_columns = st.columns(3)
     summary_columns[0].metric("Tables found", len(result.tables))
@@ -374,6 +378,278 @@ def main() -> None:
         _render_validation_tab(result)
     with downloads_tab:
         _render_downloads_tab(result)
+
+
+def _render_guided_extractor(
+    pdf_bytes: bytes,
+    document_key: str,
+    mode: str,
+) -> None:
+    """Render profile-free discovery, preview, cleanup, and downloads."""
+
+    try:
+        inspection = _inspect_cached(pdf_bytes)
+    except Exception as error:
+        st.error(f"This PDF could not be inspected: {error}")
+        return
+
+    summary = st.columns(2)
+    summary[0].metric("PDF pages", inspection.page_count)
+    summary[1].metric(
+        "Searchable text",
+        "Yes" if inspection.has_extractable_text else "No",
+    )
+
+    mode_key = "pages" if mode == "Page or page range" else "keyword"
+    discovery_key = f"guided-discovery-{document_key}-{mode_key}"
+    error_key = f"guided-error-{document_key}-{mode_key}"
+
+    if mode_key == "pages":
+        st.subheader("Locate tables by page")
+        with st.form(key=f"page-search-{document_key}"):
+            page_columns = st.columns(2)
+            start_page = int(
+                page_columns[0].number_input(
+                    "Start page",
+                    min_value=1,
+                    max_value=inspection.page_count,
+                    value=1,
+                    step=1,
+                )
+            )
+            end_page = int(
+                page_columns[1].number_input(
+                    "End page",
+                    min_value=1,
+                    max_value=inspection.page_count,
+                    value=1,
+                    step=1,
+                )
+            )
+            submitted = st.form_submit_button("Find tables", type="primary")
+        if submitted:
+            try:
+                with st.spinner("Scanning the selected pages for tables..."):
+                    st.session_state[discovery_key] = _discover_pages_cached(
+                        pdf_bytes,
+                        start_page,
+                        end_page,
+                    )
+                st.session_state.pop(error_key, None)
+            except Exception as error:
+                st.session_state.pop(discovery_key, None)
+                st.session_state[error_key] = str(error)
+    else:
+        st.subheader("Locate a table by name or keyword")
+        if not inspection.has_extractable_text:
+            st.warning(
+                "This PDF has little or no searchable text. Keyword search "
+                "may require OCR; page-number extraction can still be tried."
+            )
+        with st.form(key=f"keyword-search-{document_key}"):
+            keyword = st.text_input(
+                "Table name or nearby text",
+                placeholder="For example: Energy Consumption",
+            )
+            submitted = st.form_submit_button(
+                "Search and find tables",
+                type="primary",
+            )
+        if submitted:
+            try:
+                with st.spinner("Searching the PDF and detecting tables..."):
+                    st.session_state[discovery_key] = _discover_keyword_cached(
+                        pdf_bytes,
+                        keyword,
+                    )
+                st.session_state.pop(error_key, None)
+            except Exception as error:
+                st.session_state.pop(discovery_key, None)
+                st.session_state[error_key] = str(error)
+
+    if error_key in st.session_state:
+        st.error(st.session_state[error_key])
+    if discovery_key not in st.session_state:
+        st.info("Enter the locator details above, then find the available tables.")
+        return
+
+    discovery = st.session_state[discovery_key]
+    if not discovery.searched_pages:
+        st.warning(
+            f"No pages contained {discovery.keyword!r}. Try fewer words, a "
+            "nearby heading, or locate the table by page number."
+        )
+        return
+    if not discovery.candidates:
+        pages = ", ".join(str(page) for page in discovery.searched_pages)
+        st.warning(
+            f"No grid tables were detected on page(s) {pages}. The table may "
+            "be an image or may require different extraction settings."
+        )
+        return
+
+    st.success(
+        f"Found {len(discovery.candidates)} table candidate(s) on "
+        f"{len(discovery.searched_pages)} page(s)."
+    )
+    candidate_index = st.selectbox(
+        "Select the table to extract",
+        options=range(len(discovery.candidates)),
+        format_func=lambda index: discovery.candidates[index].label,
+        key=f"candidate-{document_key}-{mode_key}",
+    )
+    candidate = discovery.candidates[candidate_index]
+    raw_table = candidate.dataframe
+    last_page = candidate.page_number
+
+    if candidate.page_number < discovery.page_count:
+        join_pages = st.checkbox(
+            "This table continues onto following pages",
+            key=f"join-pages-{document_key}-{mode_key}-{candidate_index}",
+        )
+        if join_pages:
+            last_page = int(
+                st.number_input(
+                    "Continue through page",
+                    min_value=candidate.page_number + 1,
+                    max_value=discovery.page_count,
+                    value=candidate.page_number + 1,
+                    step=1,
+                    key=(
+                        f"span-end-{document_key}-{mode_key}-"
+                        f"{candidate_index}"
+                    ),
+                )
+            )
+            try:
+                raw_table = _extract_span_cached(
+                    pdf_bytes,
+                    candidate.page_number,
+                    last_page,
+                    candidate.table_index,
+                )
+            except Exception as error:
+                st.error(
+                    "The same table number could not be joined across that "
+                    f"page range: {error}"
+                )
+                return
+
+    st.subheader("Prepare the extracted table")
+    controls = st.columns(2)
+    header_options = [None, *range(min(10, len(raw_table)))]
+    header_row = controls[0].selectbox(
+        "Column header",
+        options=header_options,
+        format_func=lambda row: (
+            "Keep the raw rows" if row is None else f"Use row {row + 1}"
+        ),
+        key=f"header-{document_key}-{mode_key}-{candidate_index}",
+    )
+    drop_empty = controls[1].checkbox(
+        "Remove completely empty rows and columns",
+        value=True,
+        key=f"drop-empty-{document_key}-{mode_key}-{candidate_index}",
+    )
+    cleaned_table = clean_generic_table(
+        raw_table,
+        header_row=header_row,
+        drop_empty=drop_empty,
+    )
+
+    raw_tab, clean_tab, download_tab = st.tabs(
+        ("Raw layout", "Clean preview", "Downloads")
+    )
+    with raw_tab:
+        st.caption(
+            "Raw cell positions from the PDF are preserved without a promoted "
+            "header."
+        )
+        st.dataframe(raw_table, hide_index=True, width="stretch", height=440)
+    with clean_tab:
+        st.dataframe(
+            cleaned_table,
+            hide_index=True,
+            width="stretch",
+            height=440,
+        )
+    with download_tab:
+        page_suffix = (
+            f"page_{candidate.page_number}"
+            if last_page == candidate.page_number
+            else f"pages_{candidate.page_number}_{last_page}"
+        )
+        file_base = f"{page_suffix}_table_{candidate.table_index + 1}"
+        download_columns = st.columns(2)
+        download_columns[0].download_button(
+            "Download raw CSV",
+            data=raw_table.to_csv(index=False, header=False).encode("utf-8-sig"),
+            file_name=f"{file_base}_raw.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+        download_columns[1].download_button(
+            "Download clean CSV",
+            data=dataframe_csv_bytes(cleaned_table),
+            file_name=f"{file_base}_clean.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+
+
+def main() -> None:
+    _render_sidebar()
+    st.markdown(
+        """
+        <section class="hero">
+          <div class="hero-kicker">Profile-driven and guided extraction</div>
+          <h1>Document Table Agent</h1>
+          <p>Upload a PDF, locate a table automatically or by page and title,
+          preview its layout, and download clean CSV output.</p>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    uploaded = st.file_uploader(
+        "Upload a PDF report",
+        type=("pdf",),
+        help=f"Maximum size: {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+    )
+    if uploaded is None:
+        st.info(
+            "Upload a text-based PDF. Known report layouts use high-accuracy "
+            "profiles; other PDFs can be explored by page number or title."
+        )
+        return
+
+    pdf_bytes = uploaded.getvalue()
+    document_key = hashlib.sha256(pdf_bytes).hexdigest()[:16]
+    st.caption(f"File: {uploaded.name}")
+    mode = st.radio(
+        "How should the app locate the table?",
+        options=(
+            "Automatic profile",
+            "Page or page range",
+            "Table name or keyword",
+        ),
+        horizontal=True,
+    )
+    if mode != "Automatic profile":
+        _render_guided_extractor(pdf_bytes, document_key, mode)
+        return
+
+    try:
+        with st.spinner("Detecting the layout and extracting tables..."):
+            result = _process_cached(pdf_bytes)
+    except Exception as error:
+        st.error(f"No automatic profile could process this PDF: {error}")
+        st.caption(
+            "Choose Page or page range, or Table name or keyword above to "
+            "extract from an unregistered layout."
+        )
+        return
+    _render_profile_workspace(result, document_key)
 
 
 if __name__ == "__main__":

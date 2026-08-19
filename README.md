@@ -1,7 +1,8 @@
 # document-table-agent
 
-A profile-driven Python pipeline for extracting, validating, transforming,
-and exporting tables from PDFs.
+A Python pipeline and web interface for locating, extracting, validating,
+transforming, and exporting tables from PDFs. Known layouts use reliable
+profiles; other text-based PDFs can use guided extraction.
 
 ## Architecture
 
@@ -14,10 +15,11 @@ are generic. Document-specific choices live in immutable profiles: search
 markers, table selection, header structure, identity/measure columns, optional
 text cleanup, optional mappings, and expected output schema.
 
-This is deliberately not an "any PDF without configuration" system. Unknown
-or ambiguous layouts stop with a clear profile error rather than being guessed.
-Adding a new PDF family means adding a new `DocumentProfile`; core modules do
-not need to be rewritten.
+Automatic mode deliberately does not guess unknown layouts. The web interface
+also provides a guided fallback: locate tables by page/page range or searchable
+table title, preview every detected candidate, optionally join the same table
+across consecutive pages, choose a header row, and download raw or cleaned CSV.
+Scanned/image-only PDFs still require an OCR stage.
 
 ## Included profiles
 
@@ -50,11 +52,12 @@ python -m streamlit run app\web_app.py
 ```
 
 Your browser will open at `http://localhost:8501`. Upload a supported PDF and
-the app will detect its profile, extract its configured tables, show the
-analysis-ready data, answer supported English questions, display validation
-observations, and provide individual CSV or combined ZIP downloads. Uploaded
-files are processed through a temporary local file and are not saved to the
-project's `outputs` directory.
+choose automatic profile detection, page/page-range discovery, or table-title
+search. Profile results include analysis, questions, validation, and downloads.
+Guided results include candidate selection, raw-layout preview, optional
+multi-page stitching, header selection, cleanup, and raw/clean CSV downloads.
+Uploaded files are processed through a temporary local file and are not saved
+to the project's `outputs` directory.
 
 For Streamlit Community Cloud, use `streamlit_app.py` as the main file path.
 The repository-root launcher keeps package imports consistent between local

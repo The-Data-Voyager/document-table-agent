@@ -40,11 +40,10 @@ _LATE_COLUMNS = (
 )
 
 
-def _schema(columns: tuple[str, ...], row_count: int) -> OutputSchemaProfile:
+def _schema(columns: tuple[str, ...]) -> OutputSchemaProfile:
     return OutputSchemaProfile(
         column_count=len(columns),
         column_levels=1,
-        expected_row_count=row_count,
         required_columns=columns,
         non_null_columns=columns,
         unique_key_columns=("Unique_ID",),
@@ -66,13 +65,13 @@ CURRENT_OUTBREAKS_TABLE = TableProfile(
         preprocessor=prepare_current_outbreak_table,
     ),
     output_filename="clean_current_outbreaks.csv",
-    output_schema=_schema(_CURRENT_COLUMNS, 34),
+    output_schema=_schema(_CURRENT_COLUMNS),
     postprocessors=(
         TablePostprocessorProfile(
             name="analysis",
             processor=current_outbreaks_to_analysis,
             output_filename="current_outbreaks_analysis.csv",
-            output_schema=_schema(_CURRENT_COLUMNS, 34),
+            output_schema=_schema(_CURRENT_COLUMNS),
         ),
     ),
 )
@@ -93,13 +92,13 @@ LATE_OUTBREAKS_TABLE = TableProfile(
         preprocessor=prepare_late_outbreak_table,
     ),
     output_filename="clean_late_outbreaks.csv",
-    output_schema=_schema(_LATE_COLUMNS, 5),
+    output_schema=_schema(_LATE_COLUMNS),
     postprocessors=(
         TablePostprocessorProfile(
             name="analysis",
             processor=late_outbreaks_to_analysis,
             output_filename="late_outbreaks_analysis.csv",
-            output_schema=_schema(_LATE_COLUMNS, 5),
+            output_schema=_schema(_LATE_COLUMNS),
         ),
     ),
 )

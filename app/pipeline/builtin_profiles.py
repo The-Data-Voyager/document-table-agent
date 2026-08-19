@@ -43,7 +43,6 @@ ENERGY_CONSUMPTION_TABLE = TableProfile(
             output_schema=OutputSchemaProfile(
                 column_count=4,
                 column_levels=1,
-                expected_row_count=280,
                 required_columns=(
                     "Region",
                     "State",
@@ -84,7 +83,6 @@ MAXIMUM_DEMAND_TABLE = TableProfile(
             output_schema=OutputSchemaProfile(
                 column_count=5,
                 column_levels=1,
-                expected_row_count=273,
                 required_columns=(
                     "Region",
                     "State",

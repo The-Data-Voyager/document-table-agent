@@ -6,22 +6,50 @@ import io
 import tempfile
 import zipfile
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 import pandas as pd
 
 from app.agent import NaturalLanguageQueryResult, NaturalLanguageTableAgent
 from app.agent.builtin_semantics import BUILTIN_SEMANTIC_CATALOGS
+from app.extraction.generic_extractor import (
+    GenericTableCandidate,
+    discover_table_candidates,
+)
+from app.extraction.table_extractor import extract_table_span_as_dataframe
+from app.parsers.pdf_parser import get_page_count, pdf_has_text, search_pdf
 from app.pipeline.builtin_profiles import BUILTIN_DOCUMENT_PROFILES
 from app.pipeline.profiles import DocumentProfile
 from app.pipeline.runner import DocumentPipelineResult, run_profiled_pipeline
 
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_GUIDED_PAGES = 30
 
 
 class InvalidPdfUploadError(ValueError):
     """Raised when uploaded content is not a supported PDF payload."""
+
+
+@dataclass(frozen=True)
+class PdfInspection:
+    """Basic facts needed to configure guided extraction controls."""
+
+    page_count: int
+    has_extractable_text: bool
+
+
+@dataclass(frozen=True)
+class GenericDiscoveryResult:
+    """Tables discovered without selecting a document profile."""
+
+    page_count: int
+    searched_pages: tuple[int, ...]
+    candidates: tuple[GenericTableCandidate, ...]
+    keyword: str | None = None
 
 
 def validate_pdf_upload(
@@ -49,6 +77,15 @@ def validate_pdf_upload(
     return pdf_bytes
 
 
+@contextmanager
+def _temporary_pdf_path(pdf_bytes: bytes) -> Iterator[Path]:
+    validated = validate_pdf_upload(pdf_bytes)
+    with tempfile.TemporaryDirectory(prefix="document-table-agent-") as temp_dir:
+        pdf_path = Path(temp_dir) / "uploaded.pdf"
+        pdf_path.write_bytes(validated)
+        yield pdf_path
+
+
 def process_pdf_bytes(
     pdf_bytes: bytes,
     *,
@@ -56,11 +93,112 @@ def process_pdf_bytes(
 ) -> DocumentPipelineResult:
     """Process PDF bytes using automatic, profile-based document detection."""
 
-    validated = validate_pdf_upload(pdf_bytes)
-    with tempfile.TemporaryDirectory(prefix="document-table-agent-") as temp_dir:
-        pdf_path = Path(temp_dir) / "uploaded.pdf"
-        pdf_path.write_bytes(validated)
+    with _temporary_pdf_path(pdf_bytes) as pdf_path:
         return run_profiled_pipeline(pdf_path, tuple(profiles))
+
+
+def inspect_pdf_bytes(pdf_bytes: bytes) -> PdfInspection:
+    """Return page count and whether a PDF contains searchable text."""
+
+    with _temporary_pdf_path(pdf_bytes) as pdf_path:
+        return PdfInspection(
+            page_count=get_page_count(pdf_path),
+            has_extractable_text=pdf_has_text(pdf_path),
+        )
+
+
+def _validated_page_range(
+    start_page: int,
+    end_page: int,
+    *,
+    total_pages: int,
+) -> tuple[int, ...]:
+    if any(
+        isinstance(page, bool) or not isinstance(page, int)
+        for page in (start_page, end_page)
+    ):
+        raise TypeError("Page numbers must be integers.")
+    if start_page < 1 or end_page > total_pages or start_page > end_page:
+        raise ValueError(
+            f"Choose an ascending page range between 1 and {total_pages}."
+        )
+    pages = tuple(range(start_page, end_page + 1))
+    if len(pages) > MAX_GUIDED_PAGES:
+        raise ValueError(
+            f"Guided extraction is limited to {MAX_GUIDED_PAGES} pages at a "
+            "time. Choose a smaller range."
+        )
+    return pages
+
+
+def discover_pdf_tables_by_page(
+    pdf_bytes: bytes,
+    *,
+    start_page: int,
+    end_page: int,
+) -> GenericDiscoveryResult:
+    """Discover every table in a user-selected inclusive page range."""
+
+    with _temporary_pdf_path(pdf_bytes) as pdf_path:
+        total_pages = get_page_count(pdf_path)
+        pages = _validated_page_range(
+            start_page,
+            end_page,
+            total_pages=total_pages,
+        )
+        return GenericDiscoveryResult(
+            page_count=total_pages,
+            searched_pages=pages,
+            candidates=discover_table_candidates(pdf_path, pages),
+        )
+
+
+def discover_pdf_tables_by_keyword(
+    pdf_bytes: bytes,
+    keyword: str,
+) -> GenericDiscoveryResult:
+    """Find pages containing a title/keyword and discover their tables."""
+
+    normalized_keyword = keyword.strip()
+    if not normalized_keyword:
+        raise ValueError("Enter a non-empty table name or keyword.")
+    with _temporary_pdf_path(pdf_bytes) as pdf_path:
+        total_pages = get_page_count(pdf_path)
+        pages = tuple(search_pdf(pdf_path, normalized_keyword))
+        if len(pages) > MAX_GUIDED_PAGES:
+            raise ValueError(
+                f"The keyword matched more than {MAX_GUIDED_PAGES} pages. "
+                "Use a more specific table title."
+            )
+        return GenericDiscoveryResult(
+            page_count=total_pages,
+            searched_pages=pages,
+            candidates=discover_table_candidates(pdf_path, pages) if pages else (),
+            keyword=normalized_keyword,
+        )
+
+
+def extract_pdf_table_span(
+    pdf_bytes: bytes,
+    *,
+    start_page: int,
+    end_page: int,
+    table_index: int,
+) -> pd.DataFrame:
+    """Extract the same detected table number across consecutive pages."""
+
+    with _temporary_pdf_path(pdf_bytes) as pdf_path:
+        total_pages = get_page_count(pdf_path)
+        pages = _validated_page_range(
+            start_page,
+            end_page,
+            total_pages=total_pages,
+        )
+        return extract_table_span_as_dataframe(
+            pdf_path,
+            pages,
+            table_index=table_index,
+        )
 
 
 def analysis_tables(
