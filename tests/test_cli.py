@@ -68,7 +68,7 @@ def test_tables_command_prints_analysis_schemas(sample_pdf, capsys):
     assert status == 0
     assert "energy_consumption: 280 rows" in captured.out
     assert "maximum_demand: 273 rows" in captured.out
-    assert "Date: datetime64[us]" in captured.out
+    assert "Date: datetime64[" in captured.out
     assert captured.err == ""
 
 

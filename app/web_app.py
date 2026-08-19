@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
+
+# Streamlit Cloud runs a nested entrypoint with its directory at the front of
+# sys.path. Add the repository root so absolute ``app.*`` imports work both
+# locally and in that deployment environment.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.document_service import (
     MAX_UPLOAD_BYTES,

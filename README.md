@@ -56,6 +56,10 @@ observations, and provide individual CSV or combined ZIP downloads. Uploaded
 files are processed through a temporary local file and are not saved to the
 project's `outputs` directory.
 
+For Streamlit Community Cloud, use `streamlit_app.py` as the main file path.
+The repository-root launcher keeps package imports consistent between local
+and hosted environments.
+
 Open the notebooks with:
 
 ```powershell

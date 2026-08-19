@@ -4,7 +4,7 @@ from streamlit.testing.v1 import AppTest
 
 
 def test_web_app_starts_in_its_empty_upload_state():
-    app = AppTest.from_file("app/web_app.py").run(timeout=20)
+    app = AppTest.from_file("streamlit_app.py").run(timeout=20)
 
     assert not app.exception
     assert any("Document Table Agent" in item.value for item in app.markdown)
