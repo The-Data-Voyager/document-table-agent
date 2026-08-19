@@ -67,3 +67,36 @@ _render_guided_extractor(
     assert not app.exception
     assert len(app.dataframe) >= 2
     assert any("table candidate" in item.value for item in app.success)
+
+
+def test_guided_extractor_offers_stacked_table_sections():
+    sample_pdf = next(
+        path.resolve()
+        for path in Path("sample_documents").glob("*.pdf")
+        if path.name.startswith("Weekly ")
+    )
+    script = f"""
+from pathlib import Path
+import streamlit as st
+from app.document_service import discover_pdf_tables_by_page
+from app.web_app import _render_guided_extractor
+
+pdf_bytes = Path({str(sample_pdf)!r}).read_bytes()
+st.session_state["guided-discovery-stacked-document-pages"] = (
+    discover_pdf_tables_by_page(pdf_bytes, start_page=2, end_page=2)
+)
+_render_guided_extractor(
+    pdf_bytes,
+    "stacked-document",
+    "Page or page range",
+)
+"""
+
+    app = AppTest.from_string(script).run(timeout=30)
+
+    assert not app.exception
+    assert any("vertically stacked" in item.value for item in app.warning)
+    assert any(
+        item.label == "Table section on this page"
+        for item in app.selectbox
+    )

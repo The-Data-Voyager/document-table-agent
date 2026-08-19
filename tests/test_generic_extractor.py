@@ -11,6 +11,7 @@ from app.document_service import (
 from app.extraction.generic_extractor import clean_generic_table
 from app.extraction.generic_extractor import (
     discover_table_candidates,
+    split_table_sections,
     suggest_header_rows,
 )
 
@@ -113,3 +114,24 @@ def test_generic_cleanup_reconstructs_bilingual_multirow_header():
         for column in cleaned.columns
         for character in column
     )
+
+
+def test_generic_extractor_splits_vertically_stacked_page_tables():
+    electricity_pdf = next(
+        path
+        for path in Path("sample_documents").glob("*.pdf")
+        if path.name.startswith("Weekly ")
+    )
+    combined = discover_table_candidates(electricity_pdf, (2,))[0].dataframe
+
+    sections = split_table_sections(combined)
+
+    assert [(section.start_row, section.end_row) for section in sections] == [
+        (0, 10),
+        (10, 20),
+        (20, 29),
+    ]
+    assert [section.dataframe.shape[0] for section in sections] == [10, 10, 9]
+    assert "Evening Demand Met" in sections[0].title
+    assert "Energy Met & Hydro Generation" in sections[1].title
+    assert "All India Grid Frequency" in sections[2].title

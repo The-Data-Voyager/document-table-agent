@@ -56,8 +56,8 @@ choose automatic profile detection, page/page-range discovery, or table-title
 search. Profile results include analysis, questions, validation, and downloads.
 Guided results include candidate selection, raw-layout preview, optional
 multi-page stitching, automatic multi-row header suggestions, merged-header
-flattening, optional Hindi/Devanagari removal, cleanup, and raw/clean CSV
-downloads.
+flattening, automatic selection between vertically stacked tables on one page,
+optional Hindi/Devanagari removal, cleanup, and raw/clean CSV downloads.
 Uploaded files are processed through a temporary local file and are not saved
 to the project's `outputs` directory.
 

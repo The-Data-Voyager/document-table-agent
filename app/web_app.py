@@ -32,6 +32,7 @@ from app.document_service import (
 )
 from app.extraction.generic_extractor import (
     clean_generic_table,
+    split_table_sections,
     suggest_header_rows,
 )
 
@@ -538,6 +539,22 @@ def _render_guided_extractor(
                 )
                 return
 
+    sections = split_table_sections(raw_table)
+    section_number = 1
+    if len(sections) > 1:
+        st.warning(
+            f"This detected grid contains {len(sections)} vertically stacked "
+            "tables. Select the one you want before preparing its headers."
+        )
+        section_index = st.selectbox(
+            "Table section on this page",
+            options=range(len(sections)),
+            format_func=lambda index: sections[index].label,
+            key=f"section-{document_key}-{mode_key}-{candidate_index}",
+        )
+        section_number = section_index + 1
+        raw_table = sections[section_index].dataframe
+
     st.subheader("Prepare the extracted table")
     suggested_headers = suggest_header_rows(raw_table)
     if suggested_headers:
@@ -629,6 +646,8 @@ def _render_guided_extractor(
             else f"pages_{candidate.page_number}_{last_page}"
         )
         file_base = f"{page_suffix}_table_{candidate.table_index + 1}"
+        if len(sections) > 1:
+            file_base = f"{file_base}_section_{section_number}"
         download_columns = st.columns(2)
         download_columns[0].download_button(
             "Download raw CSV",

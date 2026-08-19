@@ -40,6 +40,21 @@ class GenericTableCandidate:
         )
 
 
+@dataclass
+class GenericTableSection:
+    """One logical table inside a larger PDF grid extraction."""
+
+    start_row: int
+    end_row: int
+    title: str
+    dataframe: pd.DataFrame
+
+    @property
+    def label(self) -> str:
+        rows, columns = self.dataframe.shape
+        return f"{self.title} ({rows} rows x {columns} columns)"
+
+
 def discover_table_candidates(
     pdf_path: str | Path,
     page_numbers: tuple[int, ...] | list[int],
@@ -102,6 +117,66 @@ def _is_data_like(value: object) -> bool:
         return False
     text = value.strip()
     return bool(_NUMBER_PATTERN.fullmatch(text) or _DATE_PATTERN.fullmatch(text))
+
+
+def _row_text(dataframe: pd.DataFrame, row_position: int) -> str:
+    parts = [
+        str(value)
+        for value in dataframe.iloc[row_position].tolist()
+        if not _is_missing(value) and str(value).strip()
+    ]
+    return _clean_text(" ".join(parts), remove_devanagari=True)
+
+
+def split_table_sections(
+    dataframe: pd.DataFrame,
+) -> tuple[GenericTableSection, ...]:
+    """Split vertically stacked numbered tables detected as one PDF grid."""
+
+    if not isinstance(dataframe, pd.DataFrame):
+        raise TypeError("dataframe must be a pandas DataFrame.")
+    if dataframe.empty:
+        return ()
+
+    starts = [0]
+    maximum_title_cells = max(2, dataframe.shape[1] // 4)
+    for row_position in range(1, len(dataframe)):
+        values = dataframe.iloc[row_position].tolist()
+        populated = sum(
+            not _is_missing(value) and str(value).strip() != ""
+            for value in values
+        )
+        text = _row_text(dataframe, row_position)
+        if (
+            populated <= maximum_title_cells
+            and re.search(r"(?:^|\s)\d+\.\s+[A-Za-z]", text)
+        ):
+            starts.append(row_position)
+
+    sections: list[GenericTableSection] = []
+    boundaries = [*starts, len(dataframe)]
+    for section_index, (start, end) in enumerate(
+        zip(boundaries, boundaries[1:]),
+        start=1,
+    ):
+        text = _row_text(dataframe, start)
+        title_match = re.search(r"(?:^|\s)(\d+\.\s+.+)", text)
+        title = (
+            title_match.group(1).strip()
+            if title_match
+            else f"Table section {section_index}"
+        )
+        if len(title) > 90:
+            title = f"{title[:87].rstrip()}..."
+        sections.append(
+            GenericTableSection(
+                start_row=start,
+                end_row=end,
+                title=title,
+                dataframe=dataframe.iloc[start:end].copy().reset_index(drop=True),
+            )
+        )
+    return tuple(sections)
 
 
 def suggest_header_rows(dataframe: pd.DataFrame) -> tuple[int, ...]:
