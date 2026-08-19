@@ -1,0 +1,28 @@
+{
+  "table": "energy_consumption",
+  "filters": [
+    {
+      "column": "Region",
+      "operator": "ne",
+      "value": "ALL INDIA"
+    }
+  ],
+  "group_by": [
+    "Region",
+    "State"
+  ],
+  "aggregations": [
+    {
+      "column": "Energy_Consumption_MU",
+      "operation": "sum",
+      "alias": "Weekly_Energy_MU"
+    }
+  ],
+  "order_by": [
+    {
+      "column": "Weekly_Energy_MU",
+      "direction": "desc"
+    }
+  ],
+  "limit": 5
+}
