@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from app.agent import (
+from app.agent.generic_analysis import (
     apply_column_corrections,
     ask_generic_table_question,
     build_chart_data,

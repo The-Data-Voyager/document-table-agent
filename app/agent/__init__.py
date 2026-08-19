@@ -29,26 +29,11 @@ from app.agent.request_parser import (
     SortSpec,
     parse_query_request,
 )
-from app.agent.generic_analysis import (
-    apply_column_corrections,
-    ask_generic_table_question,
-    build_chart_data,
-    build_generic_semantic_catalog,
-    generic_question_examples,
-    preferred_category_column,
-    prepare_table_for_analysis,
-)
-
 __all__ = [
     "AggregationSpec",
-    "apply_column_corrections",
     "AmbiguousQuestionError",
-    "ask_generic_table_question",
-    "build_chart_data",
-    "build_generic_semantic_catalog",
     "DimensionSemantic",
     "FilterSpec",
-    "generic_question_examples",
     "NoMatchingRowsError",
     "MetricSemantic",
     "NaturalLanguageQueryResult",
@@ -68,6 +53,4 @@ __all__ = [
     "execute_query",
     "interpret_question",
     "parse_query_request",
-    "preferred_category_column",
-    "prepare_table_for_analysis",
 ]
