@@ -34,9 +34,13 @@ class GenericTableCandidate:
     @property
     def label(self) -> str:
         rows, columns = self.dataframe.shape
+        sections = split_table_sections(self.dataframe)
+        section_text = (
+            f", {len(sections)} logical sections" if len(sections) > 1 else ""
+        )
         return (
             f"Page {self.page_number} - Table {self.table_index + 1} "
-            f"({rows} rows x {columns} columns)"
+            f"({rows} rows x {columns} columns{section_text})"
         )
 
 

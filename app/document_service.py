@@ -18,6 +18,7 @@ from app.agent.builtin_semantics import BUILTIN_SEMANTIC_CATALOGS
 from app.extraction.generic_extractor import (
     GenericTableCandidate,
     discover_table_candidates,
+    split_table_sections,
 )
 from app.extraction.table_extractor import extract_table_span_as_dataframe
 from app.parsers.pdf_parser import get_page_count, pdf_has_text, search_pdf
@@ -28,6 +29,7 @@ from app.pipeline.runner import DocumentPipelineResult, run_profiled_pipeline
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_GUIDED_PAGES = 30
+MAX_AUTOMATIC_PAGES = 100
 
 
 class InvalidPdfUploadError(ValueError):
@@ -50,6 +52,24 @@ class GenericDiscoveryResult:
     searched_pages: tuple[int, ...]
     candidates: tuple[GenericTableCandidate, ...]
     keyword: str | None = None
+
+    @property
+    def logical_table_count(self) -> int:
+        """Count logical sections after splitting stacked PDF grids."""
+
+        return sum(
+            max(1, len(split_table_sections(candidate.dataframe)))
+            for candidate in self.candidates
+        )
+
+    @property
+    def pages_without_candidates(self) -> tuple[int, ...]:
+        """Return searched pages where pdfplumber found no table grid."""
+
+        detected_pages = {candidate.page_number for candidate in self.candidates}
+        return tuple(
+            page for page in self.searched_pages if page not in detected_pages
+        )
 
 
 def validate_pdf_upload(
@@ -146,6 +166,27 @@ def discover_pdf_tables_by_page(
             end_page,
             total_pages=total_pages,
         )
+        return GenericDiscoveryResult(
+            page_count=total_pages,
+            searched_pages=pages,
+            candidates=discover_table_candidates(pdf_path, pages),
+        )
+
+
+def discover_pdf_tables_automatically(
+    pdf_bytes: bytes,
+) -> GenericDiscoveryResult:
+    """Discover table grids across every page of a reasonably sized PDF."""
+
+    with _temporary_pdf_path(pdf_bytes) as pdf_path:
+        total_pages = get_page_count(pdf_path)
+        if total_pages > MAX_AUTOMATIC_PAGES:
+            raise ValueError(
+                f"Automatic whole-document discovery is limited to "
+                f"{MAX_AUTOMATIC_PAGES} pages. Use Page or page range for "
+                "larger documents."
+            )
+        pages = tuple(range(1, total_pages + 1))
         return GenericDiscoveryResult(
             page_count=total_pages,
             searched_pages=pages,

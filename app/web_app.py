@@ -23,6 +23,7 @@ from app.document_service import (
     ask_document_question,
     build_download_zip,
     dataframe_csv_bytes,
+    discover_pdf_tables_automatically,
     discover_pdf_tables_by_keyword,
     discover_pdf_tables_by_page,
     downloadable_tables,
@@ -127,6 +128,11 @@ def _discover_pages_cached(
 
 
 @st.cache_data(show_spinner=False, max_entries=12)
+def _discover_all_cached(pdf_bytes: bytes):
+    return discover_pdf_tables_automatically(pdf_bytes)
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
 def _discover_keyword_cached(pdf_bytes: bytes, keyword: str):
     return discover_pdf_tables_by_keyword(pdf_bytes, keyword)
 
@@ -185,7 +191,7 @@ def _render_sidebar() -> None:
         st.header("How it works")
         st.markdown(
             "1. Upload a PDF.\n"
-            "2. Use automatic detection, a page range, or a table title.\n"
+            "2. Scan every page, use a profile, or locate by page/title.\n"
             "3. Preview, clean, and download the selected table."
         )
         st.divider()
@@ -195,8 +201,8 @@ def _render_sidebar() -> None:
             "- IDSP weekly outbreak reports"
         )
         st.caption(
-            "Other text-based PDFs can use guided extraction by page number "
-            "or table name. Scanned PDFs still require OCR."
+            "Other text-based PDFs can use whole-document or guided "
+            "extraction. Scanned PDFs still require OCR."
         )
 
 
@@ -404,11 +410,44 @@ def _render_guided_extractor(
         "Yes" if inspection.has_extractable_text else "No",
     )
 
-    mode_key = "pages" if mode == "Page or page range" else "keyword"
+    if mode == "Automatic all tables":
+        mode_key = "automatic"
+    elif mode == "Page or page range":
+        mode_key = "pages"
+    else:
+        mode_key = "keyword"
     discovery_key = f"guided-discovery-{document_key}-{mode_key}"
     error_key = f"guided-error-{document_key}-{mode_key}"
 
-    if mode_key == "pages":
+    if mode_key == "automatic":
+        st.subheader("Discover every table in the PDF")
+        st.caption(
+            "This scans all pages with pdfplumber. High-accuracy profile "
+            "transformations are not applied, so you can review every raw "
+            "candidate before cleaning it."
+        )
+        if not inspection.has_extractable_text:
+            st.warning(
+                "This PDF has little or no searchable text. pdfplumber may "
+                "find ruled grids, but cell text will require the OCR "
+                "fallback planned for scanned pages."
+            )
+        submitted = st.button(
+            "Scan complete PDF",
+            type="primary",
+            key=f"automatic-search-{document_key}",
+        )
+        if submitted:
+            try:
+                with st.spinner("Scanning every page for table grids..."):
+                    st.session_state[discovery_key] = _discover_all_cached(
+                        pdf_bytes
+                    )
+                st.session_state.pop(error_key, None)
+            except Exception as error:
+                st.session_state.pop(discovery_key, None)
+                st.session_state[error_key] = str(error)
+    elif mode_key == "pages":
         st.subheader("Locate tables by page")
         with st.form(key=f"page-search-{document_key}"):
             page_columns = st.columns(2)
@@ -474,7 +513,13 @@ def _render_guided_extractor(
     if error_key in st.session_state:
         st.error(st.session_state[error_key])
     if discovery_key not in st.session_state:
-        st.info("Enter the locator details above, then find the available tables.")
+        if mode_key == "automatic":
+            st.info("Scan the complete PDF to list every detected table grid.")
+        else:
+            st.info(
+                "Enter the locator details above, then find the available "
+                "tables."
+            )
         return
 
     discovery = st.session_state[discovery_key]
@@ -492,10 +537,27 @@ def _render_guided_extractor(
         )
         return
 
+    logical_count = discovery.logical_table_count
+    if logical_count == len(discovery.candidates):
+        count_description = f"{logical_count} logical table(s)"
+    else:
+        count_description = (
+            f"{logical_count} logical table(s) inside "
+            f"{len(discovery.candidates)} detected grid(s)"
+        )
     st.success(
-        f"Found {len(discovery.candidates)} table candidate(s) on "
-        f"{len(discovery.searched_pages)} page(s)."
+        f"Found {count_description} across "
+        f"{len(discovery.searched_pages)} scanned page(s)."
     )
+    if mode_key == "automatic" and discovery.pages_without_candidates:
+        missing_pages = ", ".join(
+            str(page) for page in discovery.pages_without_candidates
+        )
+        st.caption(
+            f"No table grid was detected on page(s): {missing_pages}. These "
+            "pages may contain no tables, borderless tables, or scanned "
+            "content that needs OCR."
+        )
     candidate_index = st.selectbox(
         "Select the table to extract",
         options=range(len(discovery.candidates)),
@@ -672,8 +734,8 @@ def main() -> None:
         <section class="hero">
           <div class="hero-kicker">Profile-driven and guided extraction</div>
           <h1>Document Table Agent</h1>
-          <p>Upload a PDF, locate a table automatically or by page and title,
-          preview its layout, and download clean CSV output.</p>
+          <p>Upload a PDF, discover every table or use a high-accuracy profile,
+          preview the layout, and download clean CSV output.</p>
         </section>
         """,
         unsafe_allow_html=True,
@@ -697,13 +759,14 @@ def main() -> None:
     mode = st.radio(
         "How should the app locate the table?",
         options=(
-            "Automatic profile",
+            "High-accuracy profile",
+            "Automatic all tables",
             "Page or page range",
             "Table name or keyword",
         ),
         horizontal=True,
     )
-    if mode != "Automatic profile":
+    if mode != "High-accuracy profile":
         _render_guided_extractor(pdf_bytes, document_key, mode)
         return
 
@@ -711,10 +774,10 @@ def main() -> None:
         with st.spinner("Detecting the layout and extracting tables..."):
             result = _process_cached(pdf_bytes)
     except Exception as error:
-        st.error(f"No automatic profile could process this PDF: {error}")
+        st.error(f"No high-accuracy profile could process this PDF: {error}")
         st.caption(
-            "Choose Page or page range, or Table name or keyword above to "
-            "extract from an unregistered layout."
+            "Choose Automatic all tables, Page or page range, or Table name "
+            "or keyword above to extract from an unregistered layout."
         )
         return
     _render_profile_workspace(result, document_key)

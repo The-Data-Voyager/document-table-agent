@@ -15,11 +15,13 @@ are generic. Document-specific choices live in immutable profiles: search
 markers, table selection, header structure, identity/measure columns, optional
 text cleanup, optional mappings, and expected output schema.
 
-Automatic mode deliberately does not guess unknown layouts. The web interface
-also provides a guided fallback: locate tables by page/page range or searchable
-table title, preview every detected candidate, optionally join the same table
-across consecutive pages, choose a header row, and download raw or cleaned CSV.
-Scanned/image-only PDFs still require an OCR stage.
+High-accuracy profile mode deliberately does not guess unknown layouts. The web
+interface can also scan every page with pdfplumber, or locate tables by a page
+range or searchable title. Generic results distinguish detected PDF grids from
+logical tables stacked inside those grids, support candidate preview and
+multi-page joining, and download raw or cleaned CSV. Pages without extractable
+cell text are identified as OCR candidates; scanned/image-only PDFs still
+require the planned OCR stage.
 
 ## Included profiles
 
@@ -52,9 +54,10 @@ python -m streamlit run app\web_app.py
 ```
 
 Your browser will open at `http://localhost:8501`. Upload a supported PDF and
-choose automatic profile detection, page/page-range discovery, or table-title
-search. Profile results include analysis, questions, validation, and downloads.
-Guided results include candidate selection, raw-layout preview, optional
+choose high-accuracy profile extraction, automatic whole-document discovery,
+page/page-range discovery, or table-title search. Profile results include
+analysis, questions, validation, and downloads. Generic results include
+candidate selection, raw-layout preview, optional
 multi-page stitching, automatic multi-row header suggestions, merged-header
 flattening, automatic selection between vertically stacked tables on one page,
 optional Hindi/Devanagari removal, cleanup, and raw/clean CSV downloads.

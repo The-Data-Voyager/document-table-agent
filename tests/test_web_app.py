@@ -66,7 +66,38 @@ _render_guided_extractor(
 
     assert not app.exception
     assert len(app.dataframe) >= 2
-    assert any("table candidate" in item.value for item in app.success)
+    assert any("logical table(s)" in item.value for item in app.success)
+
+
+def test_automatic_discovery_explains_grid_and_logical_table_counts():
+    sample_pdf = next(
+        path.resolve()
+        for path in Path("sample_documents").glob("*.pdf")
+        if path.name.startswith("Weekly ")
+    )
+    script = f"""
+from pathlib import Path
+import streamlit as st
+from app.document_service import discover_pdf_tables_automatically
+from app.web_app import _render_guided_extractor
+
+pdf_bytes = Path({str(sample_pdf)!r}).read_bytes()
+st.session_state["guided-discovery-automatic-document-automatic"] = (
+    discover_pdf_tables_automatically(pdf_bytes)
+)
+_render_guided_extractor(
+    pdf_bytes,
+    "automatic-document",
+    "Automatic all tables",
+)
+"""
+
+    app = AppTest.from_string(script).run(timeout=30)
+
+    assert not app.exception
+    assert any("7 logical table(s)" in item.value for item in app.success)
+    assert any("5 detected grid(s)" in item.value for item in app.success)
+    assert any("Scan complete PDF" == item.label for item in app.button)
 
 
 def test_guided_extractor_offers_stacked_table_sections():

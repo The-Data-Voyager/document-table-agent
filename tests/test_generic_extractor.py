@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.document_service import (
+    discover_pdf_tables_automatically,
     discover_pdf_tables_by_keyword,
     discover_pdf_tables_by_page,
     extract_pdf_table_span,
@@ -36,6 +37,22 @@ def test_guided_page_discovery_returns_table_candidates():
     assert discovery.candidates
     assert discovery.candidates[0].page_number == 3
     assert "Page 3 - Table 1" in discovery.candidates[0].label
+
+
+def test_automatic_discovery_scans_all_pages_and_counts_stacked_tables():
+    electricity_pdf = next(
+        path
+        for path in Path("sample_documents").glob("*.pdf")
+        if path.name.startswith("Weekly ")
+    )
+
+    discovery = discover_pdf_tables_automatically(electricity_pdf.read_bytes())
+
+    assert discovery.searched_pages == tuple(range(1, 7))
+    assert len(discovery.candidates) == 5
+    assert discovery.logical_table_count == 7
+    assert discovery.pages_without_candidates == (1,)
+    assert "3 logical sections" in discovery.candidates[0].label
 
 
 def test_guided_keyword_discovery_locates_matching_pages():
