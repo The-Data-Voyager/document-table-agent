@@ -30,7 +30,10 @@ from app.document_service import (
     inspect_pdf_bytes,
     process_pdf_bytes,
 )
-from app.extraction.generic_extractor import clean_generic_table
+from app.extraction.generic_extractor import (
+    clean_generic_table,
+    suggest_header_rows,
+)
 
 
 PROFILE_LABELS = {
@@ -536,17 +539,57 @@ def _render_guided_extractor(
                 return
 
     st.subheader("Prepare the extracted table")
+    suggested_headers = suggest_header_rows(raw_table)
+    if suggested_headers:
+        st.info(
+            f"Suggested header: start at row {suggested_headers[0] + 1} and "
+            f"combine {len(suggested_headers)} row(s)."
+        )
     controls = st.columns(2)
-    header_options = [None, *range(min(10, len(raw_table)))]
+    header_options = [None, *range(min(15, len(raw_table)))]
+    suggested_start = suggested_headers[0] if suggested_headers else None
     header_row = controls[0].selectbox(
-        "Column header",
+        "Header starts at",
         options=header_options,
         format_func=lambda row: (
-            "Keep the raw rows" if row is None else f"Use row {row + 1}"
+            "No header - keep all rows" if row is None else f"Row {row + 1}"
         ),
+        index=header_options.index(suggested_start),
         key=f"header-{document_key}-{mode_key}-{candidate_index}",
     )
-    drop_empty = controls[1].checkbox(
+    if header_row is None:
+        header_row_count = 1
+        controls[1].caption(
+            "Select a starting row to combine multi-row or merged headers."
+        )
+    else:
+        maximum_header_rows = min(4, len(raw_table) - header_row)
+        suggested_count = (
+            len(suggested_headers)
+            if suggested_headers and header_row == suggested_headers[0]
+            else 1
+        )
+        header_row_count = int(
+            controls[1].number_input(
+                "Header rows to combine",
+                min_value=1,
+                max_value=maximum_header_rows,
+                value=min(suggested_count, maximum_header_rows),
+                step=1,
+                key=(
+                    f"header-count-{document_key}-{mode_key}-"
+                    f"{candidate_index}"
+                ),
+            )
+        )
+
+    cleanup_controls = st.columns(2)
+    remove_devanagari = cleanup_controls[0].checkbox(
+        "Remove Hindi/Devanagari text from clean output",
+        value=True,
+        key=f"remove-devanagari-{document_key}-{mode_key}-{candidate_index}",
+    )
+    drop_empty = cleanup_controls[1].checkbox(
         "Remove completely empty rows and columns",
         value=True,
         key=f"drop-empty-{document_key}-{mode_key}-{candidate_index}",
@@ -554,7 +597,9 @@ def _render_guided_extractor(
     cleaned_table = clean_generic_table(
         raw_table,
         header_row=header_row,
+        header_row_count=header_row_count,
         drop_empty=drop_empty,
+        remove_devanagari=remove_devanagari,
     )
 
     raw_tab, clean_tab, download_tab = st.tabs(
@@ -562,11 +607,15 @@ def _render_guided_extractor(
     )
     with raw_tab:
         st.caption(
-            "Raw cell positions from the PDF are preserved without a promoted "
-            "header."
+            "Raw cell positions are preserved. Blank cells can represent "
+            "merged PDF headers; use Clean preview to see them reconstructed."
         )
         st.dataframe(raw_table, hide_index=True, width="stretch", height=440)
     with clean_tab:
+        st.caption(
+            "Multi-row headers are forward-filled and flattened with a | "
+            "separator for CSV compatibility."
+        )
         st.dataframe(
             cleaned_table,
             hide_index=True,

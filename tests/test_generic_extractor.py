@@ -9,6 +9,10 @@ from app.document_service import (
     inspect_pdf_bytes,
 )
 from app.extraction.generic_extractor import clean_generic_table
+from app.extraction.generic_extractor import (
+    discover_table_candidates,
+    suggest_header_rows,
+)
 
 
 def _outbreak_pdf_bytes() -> bytes:
@@ -78,3 +82,34 @@ def test_generic_cleanup_makes_duplicate_headers_unique():
     cleaned = clean_generic_table(raw, header_row=0)
 
     assert cleaned.columns.tolist() == ["Value", "Value_2"]
+
+
+def test_generic_cleanup_reconstructs_bilingual_multirow_header():
+    electricity_pdf = next(
+        path
+        for path in Path("sample_documents").glob("*.pdf")
+        if path.name.startswith("Weekly ")
+    )
+    raw = discover_table_candidates(electricity_pdf, (5,))[0].dataframe
+
+    suggested = suggest_header_rows(raw)
+    cleaned = clean_generic_table(
+        raw,
+        header_row=suggested[0],
+        header_row_count=len(suggested),
+        remove_devanagari=True,
+    )
+
+    assert suggested == (2, 3)
+    assert cleaned.shape == (8, 10)
+    assert cleaned.columns[:4].tolist() == [
+        "Date",
+        "BHUTAN | Energy Exchange (In MU)",
+        "BHUTAN | Day Peak (MW)",
+        "BHUTAN | Day Average (MW)",
+    ]
+    assert not any(
+        "\u0900" <= character <= "\u097f"
+        for column in cleaned.columns
+        for character in column
+    )
