@@ -8,9 +8,11 @@ import pytest
 from app.document_service import (
     InvalidPdfUploadError,
     analysis_tables,
+    batch_downloadable_tables,
     build_download_zip,
     dataframe_csv_bytes,
     downloadable_tables,
+    process_pdf_batch,
     process_pdf_bytes,
     validate_pdf_upload,
 )
@@ -57,6 +59,32 @@ def test_process_pdf_bytes_detects_the_electricity_profile():
     assert result.profile_name == "grid_india_weekly_report"
     assert set(result.tables) == {"energy_consumption", "maximum_demand"}
     assert analysis_tables(result)["energy_consumption"].shape == (280, 4)
+
+
+def test_batch_processing_uses_profiles_and_builds_prefixed_downloads():
+    sample_pdf = next(
+        path
+        for path in Path("sample_documents").glob("*.pdf")
+        if path.name.startswith("Weekly ")
+    )
+
+    payload = sample_pdf.read_bytes()
+    result = process_pdf_batch(
+        (
+            ("weekly report.pdf", payload),
+            ("weekly report copy.pdf", payload),
+        )
+    )
+    downloads = batch_downloadable_tables(result)
+
+    assert result.successful_documents == 2
+    assert result.table_count == 8
+    assert all(
+        document.method.startswith("Profile:")
+        for document in result.documents
+    )
+    assert any(name.startswith("weekly_report__") for name in downloads)
+    assert any(name.startswith("weekly_report_copy__") for name in downloads)
 
 
 def test_downloadable_tables_use_profile_configured_filenames():

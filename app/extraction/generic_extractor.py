@@ -21,6 +21,17 @@ _DATE_PATTERN = re.compile(
     r"^(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|"
     r"\d{4}[-/]\d{1,2}[-/]\d{1,2})$"
 )
+_PLACEHOLDER_COLUMN_PATTERN = re.compile(r"^Column_\d+$", re.IGNORECASE)
+_NARRATIVE_HEADER_CUES = (
+    "action",
+    "comment",
+    "description",
+    "detail",
+    "narrative",
+    "note",
+    "observation",
+    "remark",
+)
 
 
 @dataclass
@@ -316,6 +327,130 @@ def _compact_split_header_columns(
     return compacted.drop(columns=removed)
 
 
+def _normalized_header_value(value: object) -> str:
+    if _is_missing(value):
+        return ""
+    return " ".join(
+        re.sub(r"[^a-z0-9]+", " ", str(value).casefold()).split()
+    )
+
+
+def remove_repeated_header_rows(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Remove continuation-page rows that repeat the promoted header."""
+
+    if not isinstance(dataframe, pd.DataFrame):
+        raise TypeError("dataframe must be a pandas DataFrame.")
+    if dataframe.empty:
+        return dataframe.copy(deep=True)
+
+    column_labels = [
+        _normalized_header_value(column) for column in dataframe.columns
+    ]
+    keep_rows = []
+    for _, row in dataframe.iterrows():
+        populated = 0
+        matches = 0
+        for position, value in enumerate(row.tolist()):
+            normalized = _normalized_header_value(value)
+            if not normalized:
+                continue
+            populated += 1
+            label = column_labels[position]
+            if normalized == label or (
+                len(normalized) >= 3 and normalized in label
+            ):
+                matches += 1
+        is_header = populated >= 2 and matches / populated >= 0.6
+        keep_rows.append(not is_header)
+    return dataframe.loc[keep_rows].copy().reset_index(drop=True)
+
+
+def merge_wrapped_continuation_rows(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Attach sparse wrapped narrative rows to the preceding record.
+
+    Some ruled PDFs expose every visual line in a tall comments cell as a
+    separate table row. A continuation is merged only when its first cell is
+    blank, it contains very few populated cells, and all populated cells sit
+    under narrative-style headers. This deliberately avoids guessing across
+    ordinary sparse measure tables.
+    """
+
+    if not isinstance(dataframe, pd.DataFrame):
+        raise TypeError("dataframe must be a pandas DataFrame.")
+    if dataframe.empty or dataframe.shape[1] < 2:
+        return dataframe.copy(deep=True)
+
+    narrative_positions = {
+        position
+        for position, column in enumerate(dataframe.columns)
+        if any(
+            cue in _normalized_header_value(column)
+            for cue in _NARRATIVE_HEADER_CUES
+        )
+    }
+    if not narrative_positions:
+        return dataframe.copy(deep=True)
+
+    maximum_sparse_cells = max(1, dataframe.shape[1] // 4)
+    merged_rows: list[list[object]] = []
+    for row in dataframe.itertuples(index=False, name=None):
+        values = list(row)
+        populated_positions = [
+            position
+            for position, value in enumerate(values)
+            if not _is_missing(value) and str(value).strip()
+        ]
+        is_continuation = (
+            bool(merged_rows)
+            and 0 not in populated_positions
+            and 0 < len(populated_positions) <= maximum_sparse_cells
+            and set(populated_positions).issubset(narrative_positions)
+        )
+        if not is_continuation:
+            merged_rows.append(values)
+            continue
+
+        previous = merged_rows[-1]
+        for position in populated_positions:
+            fragment = str(values[position]).strip()
+            existing = previous[position]
+            if _is_missing(existing) or not str(existing).strip():
+                previous[position] = fragment
+            else:
+                previous[position] = (
+                    f"{str(existing).rstrip()} {fragment.lstrip()}"
+                )
+
+    return pd.DataFrame(merged_rows, columns=dataframe.columns).reset_index(
+        drop=True
+    )
+
+
+def find_suspicious_columns(dataframe: pd.DataFrame) -> tuple[str, ...]:
+    """Flag populated placeholder columns and adjacent clipped fragments."""
+
+    if not isinstance(dataframe, pd.DataFrame):
+        raise TypeError("dataframe must be a pandas DataFrame.")
+    columns = [str(column) for column in dataframe.columns]
+    suspicious: set[str] = set()
+    for position, column in enumerate(columns):
+        if not _PLACEHOLDER_COLUMN_PATTERN.fullmatch(column):
+            continue
+        series = dataframe.iloc[:, position]
+        if not any(
+            not _is_missing(value) and str(value).strip()
+            for value in series.tolist()
+        ):
+            continue
+        suspicious.add(column)
+        if position > 0:
+            previous = columns[position - 1]
+            compact = re.sub(r"\W+", "", previous)
+            if len(compact) <= 4:
+                suspicious.add(previous)
+    return tuple(column for column in columns if column in suspicious)
+
+
 def clean_generic_table(
     dataframe: pd.DataFrame,
     *,
@@ -323,6 +458,8 @@ def clean_generic_table(
     header_row_count: int = 1,
     drop_empty: bool = True,
     remove_devanagari: bool = False,
+    remove_repeated_headers: bool = True,
+    merge_continuation_rows: bool = True,
 ) -> pd.DataFrame:
     """Apply only user-selected, layout-agnostic cleanup to a raw table."""
 
@@ -347,6 +484,10 @@ def clean_generic_table(
         raise ValueError("The selected header rows extend beyond the table.")
     if not isinstance(remove_devanagari, bool):
         raise TypeError("remove_devanagari must be a boolean.")
+    if not isinstance(remove_repeated_headers, bool):
+        raise TypeError("remove_repeated_headers must be a boolean.")
+    if not isinstance(merge_continuation_rows, bool):
+        raise TypeError("merge_continuation_rows must be a boolean.")
 
     cleaned = dataframe.copy(deep=True)
     cleaned = cleaned.map(
@@ -366,6 +507,10 @@ def clean_generic_table(
         )
         cleaned.columns = _combined_headers(cleaned.iloc[header_row:header_end])
         cleaned = cleaned.iloc[header_end:].copy()
+        if remove_repeated_headers:
+            cleaned = remove_repeated_header_rows(cleaned)
+        if merge_continuation_rows:
+            cleaned = merge_wrapped_continuation_rows(cleaned)
 
     if drop_empty:
         empty = cleaned.isna() | cleaned.map(

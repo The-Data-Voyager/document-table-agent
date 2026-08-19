@@ -1,8 +1,29 @@
-# document-table-agent
+# Document Table Agent
 
-A Python pipeline and web interface for locating, extracting, validating,
-transforming, and exporting tables from PDFs. Known layouts use reliable
-profiles; other text-based PDFs can use guided extraction.
+A Python pipeline and Streamlit interface for locating, extracting, correcting,
+analyzing, visualizing, and exporting tables from PDFs. Known layouts use
+reliable profiles; other text-based PDFs use automatic or guided pdfplumber
+extraction.
+
+## Product capabilities
+
+- Profile-driven, automatic whole-document, page-range, and keyword extraction.
+- Multiple logical tables on one page and continuation tables across pages.
+- Multi-row header reconstruction, repeated continuation-header removal,
+  wrapped narrative-row repair, optional Hindi/Devanagari cleanup, and
+  empty-row/column cleanup.
+- A clipped/split-column warning for suspicious fragments such as `D D` and
+  `Column_9`, which should be checked against the original PDF.
+- Non-destructive row, cell, column-name, and column-removal corrections.
+- Deterministic numerical questions over every corrected table, including
+  tables from unknown document layouts.
+- Bar, line, and scatter charts with sum, mean, minimum, maximum, or no
+  aggregation.
+- Batch processing of up to 10 PDFs with a combined ZIP download.
+
+The app extracts text and geometry already present in the PDF. Image-only or
+scanned pages still require an OCR stage; the app reports this instead of
+silently inventing cell content.
 
 ## Architecture
 
@@ -43,7 +64,8 @@ page extraction remains unchanged. Use
 ```powershell
 Set-Location 'C:\Users\vinee\document-table-agent'
 python -m pip install -r requirements-dev.txt
-python -m pytest -q -p no:cacheprovider
+python -m pytest -q -p no:cacheprovider `
+  --basetemp="$env:TEMP\document-table-agent-pytest"
 ```
 
 ## Local web interface
@@ -51,23 +73,40 @@ python -m pytest -q -p no:cacheprovider
 Run the Streamlit interface from the project directory:
 
 ```powershell
-python -m streamlit run app\web_app.py
+python -m streamlit run streamlit_app.py
 ```
 
-Your browser will open at `http://localhost:8501`. Upload a supported PDF and
+Your browser will open at `http://localhost:8501`. Upload one or more PDFs and
 choose high-accuracy profile extraction, automatic whole-document discovery,
 page/page-range discovery, or table-title search. Profile results include
-analysis, questions, validation, and downloads. Generic results include
-candidate selection, raw-layout preview, optional
-multi-page stitching, automatic multi-row header suggestions, merged-header
-flattening, automatic selection between vertically stacked tables on one page,
-optional Hindi/Devanagari removal, cleanup, and raw/clean CSV downloads.
-Uploaded files are processed through a temporary local file and are not saved
-to the project's `outputs` directory.
+curated questions, generic table questions, charts, validation, corrections,
+and downloads. Generic results include candidate selection, raw-layout preview,
+optional multi-page stitching, automatic multi-row header suggestions,
+continuation-header removal, merged-header flattening, automatic selection
+between vertically stacked tables on one page, optional Hindi/Devanagari
+removal, manual correction, charts, and raw/corrected CSV downloads. Multiple
+uploads also enable one-click batch extraction and a combined ZIP. Uploaded
+files are processed through temporary local files and are not saved to the
+project's `outputs` directory.
 
 For Streamlit Community Cloud, use `streamlit_app.py` as the main file path.
 The repository-root launcher keeps package imports consistent between local
 and hosted environments.
+
+## Demonstration checklist
+
+1. Upload a known GRID-INDIA or IDSP report and show automatic profile
+   detection, curated questions, validation, charts, and downloads.
+2. Upload an unrelated text-based PDF, select **Automatic all tables**, and
+   scan the complete document.
+3. Show a page containing stacked tables, then select one logical section.
+4. Join a continuation table across pages and keep **Remove repeated headers**
+   enabled.
+5. Use **Correct** to rename/remove a column and edit a cell; then ask a
+   numerical question and create a chart from that corrected table.
+6. Upload two or more PDFs, process the batch, and download the combined ZIP.
+7. For a scanned PDF, explain the visible OCR warning rather than presenting an
+   empty extraction as reliable data.
 
 Open the notebooks with:
 

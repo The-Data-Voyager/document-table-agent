@@ -8,6 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 
 # Streamlit Cloud runs a nested entrypoint with its directory at the front of
@@ -17,10 +18,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.agent import (
+    apply_column_corrections,
+    ask_generic_table_question,
+    build_chart_data,
+    generic_question_examples,
+    preferred_category_column,
+    prepare_table_for_analysis,
+)
 from app.document_service import (
     MAX_UPLOAD_BYTES,
     analysis_tables,
     ask_document_question,
+    batch_downloadable_tables,
     build_download_zip,
     dataframe_csv_bytes,
     discover_pdf_tables_automatically,
@@ -29,10 +39,12 @@ from app.document_service import (
     downloadable_tables,
     extract_pdf_table_span,
     inspect_pdf_bytes,
+    process_pdf_batch,
     process_pdf_bytes,
 )
 from app.extraction.generic_extractor import (
     clean_generic_table,
+    find_suspicious_columns,
     split_table_sections,
     suggest_header_rows,
 )
@@ -137,6 +149,11 @@ def _discover_keyword_cached(pdf_bytes: bytes, keyword: str):
     return discover_pdf_tables_by_keyword(pdf_bytes, keyword)
 
 
+@st.cache_data(show_spinner=False, max_entries=4)
+def _process_batch_cached(documents: tuple[tuple[str, bytes], ...]):
+    return process_pdf_batch(documents)
+
+
 @st.cache_data(show_spinner=False, max_entries=12)
 def _extract_span_cached(
     pdf_bytes: bytes,
@@ -190,9 +207,10 @@ def _render_sidebar() -> None:
     with st.sidebar:
         st.header("How it works")
         st.markdown(
-            "1. Upload a PDF.\n"
-            "2. Scan every page, use a profile, or locate by page/title.\n"
-            "3. Preview, clean, and download the selected table."
+            "1. Upload one PDF or a batch.\n"
+            "2. Use a profile, scan every page, or locate by page/title.\n"
+            "3. Clean repeated headers and correct rare extraction errors.\n"
+            "4. Ask questions, build charts, and download corrected tables."
         )
         st.divider()
         st.subheader("High-accuracy profiles")
@@ -202,8 +220,339 @@ def _render_sidebar() -> None:
         )
         st.caption(
             "Other text-based PDFs can use whole-document or guided "
-            "extraction. Scanned PDFs still require OCR."
+            "extraction with pdfplumber. Image-only PDFs still require OCR."
         )
+
+
+def _table_fingerprint(dataframe: pd.DataFrame) -> str:
+    payload = dataframe.to_csv(index=False).encode("utf-8", errors="replace")
+    return hashlib.sha256(payload).hexdigest()[:12]
+
+
+def _render_manual_corrections(
+    dataframe: pd.DataFrame,
+    *,
+    workspace_key: str,
+) -> pd.DataFrame:
+    """Render non-destructive column, row, and cell correction controls."""
+
+    suspicious = find_suspicious_columns(dataframe)
+    if suspicious:
+        st.warning(
+            "Possible clipped or split source columns were detected: "
+            f"{', '.join(suspicious)}. Compare them with the PDF before "
+            "keeping, renaming, or removing them."
+        )
+    st.caption(
+        "Remove unwanted columns, edit column names, then correct individual "
+        "cells or delete/add rows. The original extraction remains unchanged."
+    )
+    dropped = st.multiselect(
+        "Columns to remove",
+        options=[str(column) for column in dataframe.columns],
+        key=f"drop-columns-{workspace_key}",
+    )
+    if len(dropped) == dataframe.shape[1]:
+        st.error("Keep at least one column in the corrected table.")
+        dropped = []
+
+    remaining = [
+        str(column) for column in dataframe.columns if str(column) not in dropped
+    ]
+    rename_frame = pd.DataFrame(
+        {"Original": remaining, "Corrected name": remaining}
+    )
+    edited_names = st.data_editor(
+        rename_frame,
+        hide_index=True,
+        disabled=["Original"],
+        width="stretch",
+        key=f"rename-columns-{workspace_key}",
+    )
+    renamed = dict(
+        zip(
+            edited_names["Original"].tolist(),
+            edited_names["Corrected name"].tolist(),
+        )
+    )
+    try:
+        corrected_columns = apply_column_corrections(
+            dataframe,
+            dropped_columns=dropped,
+            renamed_columns=renamed,
+        )
+    except (TypeError, ValueError) as error:
+        st.error(str(error))
+        corrected_columns = dataframe.copy(deep=True)
+
+    corrected = st.data_editor(
+        corrected_columns,
+        hide_index=True,
+        num_rows="dynamic",
+        width="stretch",
+        height=430,
+        key=f"edit-cells-{workspace_key}",
+    )
+    return corrected.reset_index(drop=True)
+
+
+def _render_generic_question_workspace(
+    dataframe: pd.DataFrame,
+    *,
+    workspace_key: str,
+) -> None:
+    examples = generic_question_examples(dataframe)
+    st.write(
+        "Ask numerical questions using the cleaned column names. Results are "
+        "calculated locally from the corrected table without an API key."
+    )
+    if examples:
+        st.caption("Try: " + "  •  ".join(examples))
+    else:
+        st.info(
+            "No reliably numeric measure was detected. Correct the table so "
+            "at least one measure column contains numbers."
+        )
+        return
+
+    fingerprint = _table_fingerprint(dataframe)
+    answer_key = f"generic-answer-{workspace_key}-{fingerprint}"
+    error_key = f"generic-answer-error-{workspace_key}-{fingerprint}"
+    with st.form(key=f"generic-question-form-{workspace_key}-{fingerprint}"):
+        question = st.text_input(
+            "Question about this table",
+            placeholder=examples[0],
+        )
+        submitted = st.form_submit_button("Analyze table", type="primary")
+    if submitted:
+        try:
+            st.session_state[answer_key] = ask_generic_table_question(
+                dataframe,
+                question,
+            )
+            st.session_state.pop(error_key, None)
+        except (TypeError, ValueError) as error:
+            st.session_state.pop(answer_key, None)
+            st.session_state[error_key] = str(error)
+
+    if error_key in st.session_state:
+        st.error(st.session_state[error_key])
+    if answer_key not in st.session_state:
+        return
+    result = st.session_state[answer_key]
+    st.success(
+        f"Matched {result.query_result.matched_row_count:,} rows and returned "
+        f"{result.query_result.returned_row_count:,} answer rows."
+    )
+    st.dataframe(result.answer, hide_index=True, width="stretch")
+    with st.expander("How this question was interpreted"):
+        for note in result.interpretation.notes:
+            st.caption(note)
+        st.json(asdict(result.interpretation.request))
+    with st.expander("Evidence rows"):
+        st.dataframe(
+            result.evidence,
+            hide_index=True,
+            width="stretch",
+            height=320,
+        )
+
+
+def _render_chart_workspace(
+    dataframe: pd.DataFrame,
+    *,
+    workspace_key: str,
+) -> None:
+    try:
+        prepared = prepare_table_for_analysis(dataframe)
+    except (TypeError, ValueError) as error:
+        st.info(str(error))
+        return
+    numeric_columns = [
+        column
+        for column in prepared.columns
+        if pd.api.types.is_numeric_dtype(prepared[column])
+        and not pd.api.types.is_bool_dtype(prepared[column])
+    ]
+    if not numeric_columns:
+        st.info("No reliably numeric column is available for a chart.")
+        return
+
+    chart_columns = st.columns(3)
+    y_column = chart_columns[0].selectbox(
+        "Measure",
+        options=numeric_columns,
+        key=f"chart-y-{workspace_key}",
+    )
+    x_options = [column for column in prepared.columns if column != y_column]
+    if not x_options:
+        st.info("Add a category or second numeric column to build a chart.")
+        return
+    preferred_x = preferred_category_column(
+        prepared,
+        excluded_columns=(y_column,),
+    )
+    if preferred_x is None:
+        preferred_x = x_options[0]
+    x_column = chart_columns[1].selectbox(
+        "Category / X axis",
+        options=x_options,
+        index=x_options.index(preferred_x),
+        key=f"chart-x-{workspace_key}",
+    )
+    chart_type = chart_columns[2].selectbox(
+        "Chart type",
+        options=("Bar", "Line", "Scatter"),
+        key=f"chart-type-{workspace_key}",
+    )
+    aggregation = st.selectbox(
+        "Aggregation",
+        options=("sum", "mean", "min", "max", "none"),
+        format_func=lambda value: value.title(),
+        key=f"chart-aggregation-{workspace_key}",
+    )
+    try:
+        chart_data = build_chart_data(
+            dataframe,
+            x_column=x_column,
+            y_column=y_column,
+            aggregation=aggregation,
+        )
+    except (TypeError, ValueError) as error:
+        st.error(str(error))
+        return
+    if chart_data.empty:
+        st.info("The selected columns have no chartable values.")
+        return
+    chart_display = chart_data.rename(
+        columns={x_column: "Category", y_column: "Value"}
+    )
+    if chart_type == "Line":
+        st.line_chart(
+            chart_display,
+            x="Category",
+            y="Value",
+            x_label=x_column,
+            y_label=y_column,
+            height=420,
+        )
+    elif chart_type == "Scatter":
+        if not pd.api.types.is_numeric_dtype(prepared[x_column]):
+            st.info("Scatter charts require a numeric X axis.")
+            return
+        st.scatter_chart(
+            chart_display,
+            x="Category",
+            y="Value",
+            x_label=x_column,
+            y_label=y_column,
+            height=420,
+        )
+    else:
+        st.bar_chart(
+            chart_display,
+            x="Category",
+            y="Value",
+            x_label=x_column,
+            y_label=y_column,
+            height=420,
+        )
+
+
+def _render_explore_workspace(
+    tables: dict[str, pd.DataFrame],
+    *,
+    workspace_key: str,
+) -> None:
+    selected = st.selectbox(
+        "Table to explore",
+        options=list(tables),
+        format_func=lambda name: name.replace("_", " ").title(),
+        key=f"explore-table-{workspace_key}",
+    )
+    source = tables[selected]
+    correction_tab, question_tab, chart_tab, download_tab = st.tabs(
+        ("Correct", "Ask any table", "Charts", "Download corrected")
+    )
+    with correction_tab:
+        corrected = _render_manual_corrections(
+            source,
+            workspace_key=f"{workspace_key}-{selected}",
+        )
+    with question_tab:
+        _render_generic_question_workspace(
+            corrected,
+            workspace_key=f"{workspace_key}-{selected}",
+        )
+    with chart_tab:
+        _render_chart_workspace(
+            corrected,
+            workspace_key=f"{workspace_key}-{selected}",
+        )
+    with download_tab:
+        st.download_button(
+            "Download corrected CSV",
+            data=dataframe_csv_bytes(corrected),
+            file_name=f"{selected}_corrected.csv",
+            mime="text/csv",
+            type="primary",
+        )
+
+
+def _render_batch_workspace(
+    documents: tuple[tuple[str, bytes], ...],
+    *,
+    batch_key: str,
+) -> None:
+    with st.expander("Batch processing", expanded=True):
+        st.write(
+            "Process every uploaded PDF with a high-accuracy profile when "
+            "available, otherwise use automatic whole-document discovery."
+        )
+        submitted = st.button(
+            "Process all PDFs",
+            type="primary",
+            key=f"process-batch-{batch_key}",
+        )
+        result_key = f"batch-result-{batch_key}"
+        error_key = f"batch-error-{batch_key}"
+        if submitted:
+            try:
+                with st.spinner("Extracting tables from all uploaded PDFs..."):
+                    st.session_state[result_key] = _process_batch_cached(documents)
+                st.session_state.pop(error_key, None)
+            except (TypeError, ValueError) as error:
+                st.session_state.pop(result_key, None)
+                st.session_state[error_key] = str(error)
+        if error_key in st.session_state:
+            st.error(st.session_state[error_key])
+        if result_key not in st.session_state:
+            return
+
+        result = st.session_state[result_key]
+        metrics = st.columns(3)
+        metrics[0].metric("Documents", len(result.documents))
+        metrics[1].metric("Successful", result.successful_documents)
+        metrics[2].metric("Tables", result.table_count)
+        for document in result.documents:
+            if document.error:
+                st.error(f"{document.filename}: {document.error}")
+                continue
+            st.success(
+                f"{document.filename}: {len(document.tables)} table(s) via "
+                f"{document.method}."
+            )
+            for warning in document.warnings:
+                st.warning(warning)
+        if result.table_count:
+            downloads = batch_downloadable_tables(result)
+            st.download_button(
+                "Download all batch tables (.zip)",
+                data=build_download_zip(downloads),
+                file_name="document_table_batch.zip",
+                mime="application/zip",
+                type="primary",
+            )
 
 
 def _render_tables_tab(result) -> None:
@@ -377,13 +726,18 @@ def _render_profile_workspace(result, document_key: str) -> None:
         ),
     )
 
-    tables_tab, ask_tab, validation_tab, downloads_tab = st.tabs(
-        ("Tables", "Ask", "Validation", "Downloads")
+    tables_tab, ask_tab, explore_tab, validation_tab, downloads_tab = st.tabs(
+        ("Tables", "Curated questions", "Explore & charts", "Validation", "Downloads")
     )
     with tables_tab:
         _render_tables_tab(result)
     with ask_tab:
         _render_ask_tab(result, document_key)
+    with explore_tab:
+        _render_explore_workspace(
+            analysis,
+            workspace_key=f"profile-{document_key}",
+        )
     with validation_tab:
         _render_validation_tab(result)
     with downloads_tab:
@@ -673,16 +1027,33 @@ def _render_guided_extractor(
         value=True,
         key=f"drop-empty-{document_key}-{mode_key}-{candidate_index}",
     )
+    continuation_controls = st.columns(2)
+    remove_repeated_headers = continuation_controls[0].checkbox(
+        "Remove repeated headers on continuation pages",
+        value=True,
+        key=f"repeated-headers-{document_key}-{mode_key}-{candidate_index}",
+    )
+    merge_continuation_rows = continuation_controls[1].checkbox(
+        "Merge wrapped text rows into the preceding record",
+        value=True,
+        key=f"merge-continuations-{document_key}-{mode_key}-{candidate_index}",
+        help=(
+            "Repairs long Comments, Remarks, Notes, or Description cells that "
+            "pdfplumber emitted as sparse extra rows."
+        ),
+    )
     cleaned_table = clean_generic_table(
         raw_table,
         header_row=header_row,
         header_row_count=header_row_count,
         drop_empty=drop_empty,
         remove_devanagari=remove_devanagari,
+        remove_repeated_headers=remove_repeated_headers,
+        merge_continuation_rows=merge_continuation_rows,
     )
 
-    raw_tab, clean_tab, download_tab = st.tabs(
-        ("Raw layout", "Clean preview", "Downloads")
+    raw_tab, clean_tab, correction_tab, question_tab, chart_tab, download_tab = st.tabs(
+        ("Raw layout", "Clean preview", "Correct", "Ask", "Charts", "Downloads")
     )
     with raw_tab:
         st.caption(
@@ -700,6 +1071,24 @@ def _render_guided_extractor(
             hide_index=True,
             width="stretch",
             height=440,
+        )
+    correction_key = (
+        f"guided-{document_key}-{mode_key}-{candidate_index}-{section_number}"
+    )
+    with correction_tab:
+        corrected_table = _render_manual_corrections(
+            cleaned_table,
+            workspace_key=correction_key,
+        )
+    with question_tab:
+        _render_generic_question_workspace(
+            corrected_table,
+            workspace_key=correction_key,
+        )
+    with chart_tab:
+        _render_chart_workspace(
+            corrected_table,
+            workspace_key=correction_key,
         )
     with download_tab:
         page_suffix = (
@@ -719,9 +1108,9 @@ def _render_guided_extractor(
             width="stretch",
         )
         download_columns[1].download_button(
-            "Download clean CSV",
-            data=dataframe_csv_bytes(cleaned_table),
-            file_name=f"{file_base}_clean.csv",
+            "Download corrected CSV",
+            data=dataframe_csv_bytes(corrected_table),
+            file_name=f"{file_base}_corrected.csv",
             mime="text/csv",
             width="stretch",
         )
@@ -732,30 +1121,54 @@ def main() -> None:
     st.markdown(
         """
         <section class="hero">
-          <div class="hero-kicker">Profile-driven and guided extraction</div>
+          <div class="hero-kicker">Extract • correct • analyze</div>
           <h1>Document Table Agent</h1>
-          <p>Upload a PDF, discover every table or use a high-accuracy profile,
-          preview the layout, and download clean CSV output.</p>
+          <p>Turn one PDF or a batch into reviewable tables, correct rare
+          extraction mistakes, ask data questions, create charts, and export
+          clean CSV files.</p>
         </section>
         """,
         unsafe_allow_html=True,
     )
 
-    uploaded = st.file_uploader(
-        "Upload a PDF report",
+    uploaded_files = st.file_uploader(
+        "Upload one or more PDF reports",
         type=("pdf",),
-        help=f"Maximum size: {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+        accept_multiple_files=True,
+        help=(
+            f"Maximum size per file: {MAX_UPLOAD_BYTES // (1024 * 1024)} MB; "
+            "up to 10 files per batch."
+        ),
     )
-    if uploaded is None:
+    if not uploaded_files:
         st.info(
             "Upload a text-based PDF. Known report layouts use high-accuracy "
-            "profiles; other PDFs can be explored by page number or title."
+            "profiles; other PDFs can be scanned automatically or explored "
+            "by page number or title."
         )
         return
 
-    pdf_bytes = uploaded.getvalue()
+    documents = tuple(
+        (uploaded.name, uploaded.getvalue()) for uploaded in uploaded_files
+    )
+    batch_key = hashlib.sha256(
+        b"".join(
+            name.encode("utf-8", errors="replace") + payload
+            for name, payload in documents
+        )
+    ).hexdigest()[:16]
+    if len(documents) > 1:
+        _render_batch_workspace(documents, batch_key=batch_key)
+        selected_index = st.selectbox(
+            "Document to inspect interactively",
+            options=range(len(documents)),
+            format_func=lambda index: documents[index][0],
+        )
+    else:
+        selected_index = 0
+    uploaded_name, pdf_bytes = documents[selected_index]
     document_key = hashlib.sha256(pdf_bytes).hexdigest()[:16]
-    st.caption(f"File: {uploaded.name}")
+    st.caption(f"Interactive file: {uploaded_name}")
     mode = st.radio(
         "How should the app locate the table?",
         options=(

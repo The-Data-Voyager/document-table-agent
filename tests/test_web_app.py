@@ -67,6 +67,10 @@ _render_guided_extractor(
     assert not app.exception
     assert len(app.dataframe) >= 2
     assert any("logical table(s)" in item.value for item in app.success)
+    assert any(
+        item.label == "Merge wrapped text rows into the preceding record"
+        for item in app.checkbox
+    )
 
 
 def test_automatic_discovery_explains_grid_and_logical_table_counts():
@@ -131,3 +135,47 @@ _render_guided_extractor(
         item.label == "Table section on this page"
         for item in app.selectbox
     )
+
+
+def test_explore_workspace_offers_corrections_questions_and_charts():
+    script = """
+import pandas as pd
+from app.web_app import _render_explore_workspace
+
+table = pd.DataFrame({
+    "State": ["Assam", "Bihar"],
+    "Cases": [10, 20],
+})
+_render_explore_workspace({"outbreaks": table}, workspace_key="explore-test")
+"""
+
+    app = AppTest.from_string(script).run(timeout=30)
+
+    assert not app.exception
+    assert any(item.label == "Columns to remove" for item in app.multiselect)
+    assert any(
+        item.label == "Question about this table" for item in app.text_input
+    )
+    assert any(item.label == "Chart type" for item in app.selectbox)
+
+
+def test_chart_workspace_uses_safe_fields_for_pdf_column_punctuation():
+    script = """
+import pandas as pd
+from app.web_app import _render_chart_workspace
+
+table = pd.DataFrame({
+    "Disease/ Illness": ["Typhoid", "Measles", "Typhoid"],
+    "No. of Cases": [9, 5, 15],
+})
+_render_chart_workspace(table, workspace_key="punctuated-chart")
+"""
+
+    app = AppTest.from_string(script).run(timeout=30)
+
+    assert not app.exception
+    chart = app.get("arrow_vega_lite_chart")[0]
+    assert '"field": "Category"' in chart.proto.spec
+    assert '"field": "Value"' in chart.proto.spec
+    assert '"title": "No. of Cases"' in chart.proto.spec
+    assert '"height": 420' in chart.proto.spec

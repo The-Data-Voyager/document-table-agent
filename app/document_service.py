@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import tempfile
 import zipfile
 from collections.abc import Mapping, Sequence
@@ -17,8 +18,11 @@ from app.agent import NaturalLanguageQueryResult, NaturalLanguageTableAgent
 from app.agent.builtin_semantics import BUILTIN_SEMANTIC_CATALOGS
 from app.extraction.generic_extractor import (
     GenericTableCandidate,
+    clean_generic_table,
     discover_table_candidates,
+    find_suspicious_columns,
     split_table_sections,
+    suggest_header_rows,
 )
 from app.extraction.table_extractor import extract_table_span_as_dataframe
 from app.parsers.pdf_parser import get_page_count, pdf_has_text, search_pdf
@@ -30,6 +34,8 @@ from app.pipeline.runner import DocumentPipelineResult, run_profiled_pipeline
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_GUIDED_PAGES = 30
 MAX_AUTOMATIC_PAGES = 100
+MAX_BATCH_FILES = 10
+MAX_BATCH_BYTES = 75 * 1024 * 1024
 
 
 class InvalidPdfUploadError(ValueError):
@@ -70,6 +76,32 @@ class GenericDiscoveryResult:
         return tuple(
             page for page in self.searched_pages if page not in detected_pages
         )
+
+
+@dataclass(frozen=True)
+class BatchDocumentResult:
+    """Extraction outcome for one uploaded document in a batch."""
+
+    filename: str
+    method: str
+    tables: Mapping[str, pd.DataFrame]
+    warnings: tuple[str, ...] = ()
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class BatchProcessingResult:
+    """Ordered collection of per-document batch outcomes."""
+
+    documents: tuple[BatchDocumentResult, ...]
+
+    @property
+    def successful_documents(self) -> int:
+        return sum(item.error is None for item in self.documents)
+
+    @property
+    def table_count(self) -> int:
+        return sum(len(item.tables) for item in self.documents)
 
 
 def validate_pdf_upload(
@@ -241,6 +273,125 @@ def extract_pdf_table_span(
             table_index=table_index,
             normalize_column_layout=True,
         )
+
+
+def _automatically_clean_discovery(
+    discovery: GenericDiscoveryResult,
+) -> tuple[dict[str, pd.DataFrame], tuple[str, ...]]:
+    tables: dict[str, pd.DataFrame] = {}
+    warnings: list[str] = []
+    for candidate in discovery.candidates:
+        sections = split_table_sections(candidate.dataframe)
+        for section_index, section in enumerate(sections, start=1):
+            raw_table = section.dataframe
+            suggested = suggest_header_rows(raw_table)
+            cleaned = clean_generic_table(
+                raw_table,
+                header_row=suggested[0] if suggested else None,
+                header_row_count=len(suggested) if suggested else 1,
+                remove_devanagari=True,
+                remove_repeated_headers=True,
+            )
+            if cleaned.empty or cleaned.shape[1] == 0:
+                continue
+            name = (
+                f"page_{candidate.page_number}_table_"
+                f"{candidate.table_index + 1}"
+            )
+            if len(sections) > 1:
+                name = f"{name}_section_{section_index}"
+            filename = f"{name}_clean.csv"
+            tables[filename] = cleaned
+            suspicious = find_suspicious_columns(cleaned)
+            if suspicious:
+                warnings.append(
+                    f"{filename}: review possible clipped/split columns "
+                    f"{list(suspicious)!r}."
+                )
+    return tables, tuple(warnings)
+
+
+def process_pdf_batch(
+    documents: Sequence[tuple[str, bytes]],
+) -> BatchProcessingResult:
+    """Process several PDFs using profiles first and generic discovery second."""
+
+    items = tuple(documents)
+    if not items:
+        raise ValueError("Upload at least one PDF for batch processing.")
+    if len(items) > MAX_BATCH_FILES:
+        raise ValueError(
+            f"Batch processing is limited to {MAX_BATCH_FILES} PDFs at once."
+        )
+    total_bytes = sum(len(payload) for _, payload in items)
+    if total_bytes > MAX_BATCH_BYTES:
+        raise ValueError(
+            "The combined batch exceeds the 75 MB processing limit."
+        )
+
+    results: list[BatchDocumentResult] = []
+    for filename, payload in items:
+        try:
+            validate_pdf_upload(payload)
+            try:
+                profile_result = process_pdf_bytes(payload)
+            except Exception:
+                discovery = discover_pdf_tables_automatically(payload)
+                tables, warnings = _automatically_clean_discovery(discovery)
+                if not tables:
+                    raise ValueError(
+                        "No extractable text-table grids were found; OCR may "
+                        "be required."
+                    )
+                results.append(
+                    BatchDocumentResult(
+                        filename=filename,
+                        method="Automatic pdfplumber discovery",
+                        tables=tables,
+                        warnings=warnings,
+                    )
+                )
+            else:
+                results.append(
+                    BatchDocumentResult(
+                        filename=filename,
+                        method=f"Profile: {profile_result.profile_name}",
+                        tables=downloadable_tables(profile_result),
+                    )
+                )
+        except Exception as error:
+            results.append(
+                BatchDocumentResult(
+                    filename=filename,
+                    method="Failed",
+                    tables={},
+                    error=str(error),
+                )
+            )
+    return BatchProcessingResult(tuple(results))
+
+
+def batch_downloadable_tables(
+    result: BatchProcessingResult,
+) -> dict[str, pd.DataFrame]:
+    """Flatten successful batch tables into safe, unique ZIP filenames."""
+
+    if not isinstance(result, BatchProcessingResult):
+        raise TypeError("result must be a BatchProcessingResult.")
+    flattened: dict[str, pd.DataFrame] = {}
+    for document_index, document in enumerate(result.documents, start=1):
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(document.filename).stem)
+        stem = stem.strip("_") or f"document_{document_index}"
+        for filename, table in document.tables.items():
+            candidate = f"{stem}__{Path(filename).name}"
+            suffix = 2
+            while candidate in flattened:
+                candidate = f"{stem}_{suffix}__{Path(filename).name}"
+                suffix += 1
+            flattened[candidate] = table
+    if not flattened:
+        raise ValueError("The batch produced no tables to download.")
+    return flattened
 
 
 def analysis_tables(

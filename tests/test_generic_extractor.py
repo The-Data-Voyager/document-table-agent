@@ -12,6 +12,8 @@ from app.document_service import (
 from app.extraction.generic_extractor import clean_generic_table
 from app.extraction.generic_extractor import (
     discover_table_candidates,
+    find_suspicious_columns,
+    remove_repeated_header_rows,
     split_table_sections,
     suggest_header_rows,
 )
@@ -101,6 +103,59 @@ def test_generic_cleanup_makes_duplicate_headers_unique():
     cleaned = clean_generic_table(raw, header_row=0)
 
     assert cleaned.columns.tolist() == ["Value", "Value_2"]
+
+
+def test_generic_cleanup_removes_repeated_continuation_headers():
+    raw = pd.DataFrame(
+        [
+            ["State", "Cases", "Deaths"],
+            ["Assam", "10", "1"],
+            ["State", "Cases", "Deaths"],
+            ["Bihar", "20", "2"],
+        ]
+    )
+
+    cleaned = clean_generic_table(raw, header_row=0)
+
+    assert cleaned.to_dict(orient="records") == [
+        {"State": "Assam", "Cases": "10", "Deaths": "1"},
+        {"State": "Bihar", "Cases": "20", "Deaths": "2"},
+    ]
+
+
+def test_generic_cleanup_merges_wrapped_narrative_continuation_rows():
+    raw = pd.DataFrame(
+        [
+            ["Unique ID", "State", "Cases", "Comments/Action Taken"],
+            ["A-1", "Assam", "12", "Cases were reported from Village"],
+            [None, None, None, "Namsai. Cases presented with fever."],
+            [None, None, None, "District RRT investigated the outbreak."],
+            ["B-1", "Bihar", "5", "Separate record."],
+        ]
+    )
+
+    cleaned = clean_generic_table(raw, header_row=0)
+    unmerged = clean_generic_table(
+        raw,
+        header_row=0,
+        merge_continuation_rows=False,
+    )
+
+    assert len(cleaned) == 2
+    assert cleaned.loc[0, "Comments/Action Taken"] == (
+        "Cases were reported from Village Namsai. Cases presented with "
+        "fever. District RRT investigated the outbreak."
+    )
+    assert len(unmerged) == 4
+
+
+def test_suspicious_columns_flags_populated_placeholder_and_short_neighbor():
+    table = pd.DataFrame(
+        {"Date": ["2 May"], "D D": ["1"], "Column_9": ["8"]}
+    )
+
+    assert find_suspicious_columns(table) == ("D D", "Column_9")
+    assert remove_repeated_header_rows(table).equals(table)
 
 
 def test_span_normalization_collapses_header_only_split_columns():
