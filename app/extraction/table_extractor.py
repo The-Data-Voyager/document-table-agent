@@ -1,8 +1,128 @@
 from pathlib import Path
 from collections.abc import Iterable
+from collections import Counter
 
 import pandas as pd
 import pdfplumber
+
+
+def _is_blank_cell(value):
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return isinstance(value, str) and not value.strip()
+
+
+def _leading_only_column_positions(table):
+    """Return columns populated only in consecutive leading header rows."""
+
+    positions = []
+    for column_position in range(table.shape[1]):
+        populated_rows = [
+            row_position
+            for row_position, value in enumerate(
+                table.iloc[:, column_position].tolist()
+            )
+            if not _is_blank_cell(value)
+        ]
+        if not populated_rows or populated_rows == list(
+            range(populated_rows[-1] + 1)
+        ):
+            positions.append(column_position)
+    return positions
+
+
+def _merge_cell_values(left, right):
+    if _is_blank_cell(left):
+        return right
+    if _is_blank_cell(right) or str(left).strip() == str(right).strip():
+        return left
+    return f"{left}\n{right}"
+
+
+def normalize_table_span_columns(tables):
+    """Align multi-page frames when headers create spurious columns.
+
+    Some PDFs draw a multi-line header in a way that pdfplumber interprets as
+    narrow, header-only columns on the first page. Continuation pages then have
+    the correct smaller width. Collapse only columns whose content is confined
+    to consecutive leading rows, and move their header text into the nearest
+    retained column before positional concatenation.
+    """
+
+    source_tables = tuple(tables)
+    if not source_tables:
+        raise ValueError("tables cannot be empty.")
+    if any(not isinstance(table, pd.DataFrame) for table in source_tables):
+        raise TypeError("tables must contain only pandas DataFrames.")
+    frames = tuple(table.copy(deep=True) for table in source_tables)
+
+    width_counts = Counter(table.shape[1] for table in frames)
+    highest_frequency = max(width_counts.values())
+    target_width = min(
+        width
+        for width, frequency in width_counts.items()
+        if frequency == highest_frequency
+    )
+
+    normalized = []
+    for table in frames:
+        excess = table.shape[1] - target_width
+        if excess <= 0:
+            normalized.append(table.reset_index(drop=True))
+            continue
+
+        candidates = _leading_only_column_positions(table)
+        candidates.sort(
+            key=lambda column: (
+                sum(
+                    not _is_blank_cell(value)
+                    for value in table.iloc[:, column].tolist()
+                ),
+                column,
+            )
+        )
+        if len(candidates) < excess:
+            normalized.append(table.reset_index(drop=True))
+            continue
+
+        removed = set(candidates[:excess])
+        retained = [
+            column for column in range(table.shape[1]) if column not in removed
+        ]
+        for column in sorted(removed):
+            populated = [
+                value
+                for value in table.iloc[:, column].tolist()
+                if not _is_blank_cell(value)
+            ]
+            if not populated:
+                continue
+            destination = min(
+                retained,
+                key=lambda candidate: (
+                    abs(candidate - column),
+                    candidate > column,
+                    candidate,
+                ),
+            )
+            for row_position in range(len(table)):
+                source = table.iat[row_position, column]
+                if not _is_blank_cell(source):
+                    table.iat[row_position, destination] = _merge_cell_values(
+                        table.iat[row_position, destination],
+                        source,
+                    )
+
+        collapsed = table.iloc[:, retained].copy()
+        collapsed.columns = range(collapsed.shape[1])
+        normalized.append(collapsed.reset_index(drop=True))
+
+    return tuple(normalized)
 
 
 def _validate_pdf_path(pdf_path):
@@ -171,6 +291,7 @@ def extract_table_span_as_dataframe(
     page_numbers: Iterable[int],
     table_index=0,
     table_settings=None,
+    normalize_column_layout=False,
 ):
     """Extract the same table index across ordered pages and concatenate it.
 
@@ -218,6 +339,9 @@ def extract_table_span_as_dataframe(
                     f"{page_number}; detected {len(tables)} tables."
                 )
             frames.append(table_to_dataframe(tables[table_index]))
+
+    if normalize_column_layout:
+        frames = list(normalize_table_span_columns(frames))
 
     return pd.concat(frames, ignore_index=True, sort=False)
 

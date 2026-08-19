@@ -15,6 +15,7 @@ from app.extraction.generic_extractor import (
     split_table_sections,
     suggest_header_rows,
 )
+from app.extraction.table_extractor import normalize_table_span_columns
 
 
 def _outbreak_pdf_bytes() -> bytes:
@@ -100,6 +101,76 @@ def test_generic_cleanup_makes_duplicate_headers_unique():
     cleaned = clean_generic_table(raw, header_row=0)
 
     assert cleaned.columns.tolist() == ["Value", "Value_2"]
+
+
+def test_span_normalization_collapses_header_only_split_columns():
+    first_page = pd.DataFrame(
+        [
+            ["ID", "State", "Cases", "", "Date of", "", "Status"],
+            [None, None, None, None, "Start of", None, None],
+            [None, None, None, None, "Outbreak", None, None],
+            ["A-1", "Assam", "08", "19-05-18", None, None, "Open"],
+        ]
+    )
+    continuation = pd.DataFrame(
+        [["B-1", "Bihar", "24", "18-05-18", "Closed"]]
+    )
+
+    normalized = normalize_table_span_columns((first_page, continuation))
+    combined = pd.concat(normalized, ignore_index=True)
+
+    assert [table.shape[1] for table in normalized] == [5, 5]
+    assert combined.iloc[0].tolist() == [
+        "ID",
+        "State",
+        "Cases",
+        "Date of",
+        "Status",
+    ]
+    assert combined.iloc[1, 3] == "Start of"
+    assert combined.iloc[2, 3] == "Outbreak"
+    assert combined.iloc[-1].tolist() == [
+        "B-1",
+        "Bihar",
+        "24",
+        "18-05-18",
+        "Closed",
+    ]
+    assert suggest_header_rows(combined) == (0, 1, 2)
+
+
+def test_cleanup_moves_detached_header_onto_its_data_column():
+    raw = pd.DataFrame(
+        [
+            ["ID", "State", "Cases", "", "Date of", "", "Status"],
+            [None, None, None, None, "Start of", None, None],
+            [None, None, None, None, "Outbreak", None, None],
+            ["A-1", "Assam", "08", "19-05-18", None, None, "Open"],
+        ]
+    )
+
+    suggested = suggest_header_rows(raw)
+    cleaned = clean_generic_table(
+        raw,
+        header_row=suggested[0],
+        header_row_count=len(suggested),
+    )
+
+    assert suggested == (0, 1, 2)
+    assert cleaned.columns.tolist() == [
+        "ID",
+        "State",
+        "Cases",
+        "Date of | Start of | Outbreak",
+        "Status",
+    ]
+    assert cleaned.iloc[0].tolist() == [
+        "A-1",
+        "Assam",
+        "08",
+        "19-05-18",
+        "Open",
+    ]
 
 
 def test_generic_cleanup_reconstructs_bilingual_multirow_header():

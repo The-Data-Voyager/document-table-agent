@@ -203,20 +203,38 @@ def suggest_header_rows(dataframe: pd.DataFrame) -> tuple[int, ...]:
         return ()
 
     header_rows: list[int] = []
+    trailing_sparse_rows: list[int] = []
+    found_dense_header = False
     sparse_threshold = max(1, dataframe.shape[1] // 5)
     for row_position in range(data_start - 1, -1, -1):
         populated = sum(
             not _is_missing(value) and str(value).strip() != ""
             for value in dataframe.iloc[row_position].tolist()
         )
-        if populated <= sparse_threshold or len(header_rows) == 4:
+        if len(header_rows) + len(trailing_sparse_rows) == 4:
             break
+        if populated <= sparse_threshold:
+            if found_dense_header:
+                break
+            trailing_sparse_rows.append(row_position)
+            continue
         header_rows.append(row_position)
+        if not found_dense_header:
+            header_rows.extend(trailing_sparse_rows)
+            trailing_sparse_rows.clear()
+            found_dense_header = True
     return tuple(sorted(header_rows))
 
 
 def _combined_headers(header_block: pd.DataFrame) -> list[str]:
-    grouped = header_block.ffill(axis=1)
+    grouped = header_block.copy(deep=True)
+    for row_position in range(len(grouped)):
+        populated = sum(
+            not _is_missing(value) and str(value).strip() != ""
+            for value in grouped.iloc[row_position].tolist()
+        )
+        if populated > 1:
+            grouped.iloc[row_position] = grouped.iloc[row_position].ffill()
     headers: list[str] = []
     final_counts: dict[str, int] = {}
 
@@ -236,6 +254,66 @@ def _combined_headers(header_block: pd.DataFrame) -> list[str]:
         suffix = f"_{final_counts[base]}" if final_counts[base] > 1 else ""
         headers.append(f"{base}{suffix}")
     return headers
+
+
+def _compact_split_header_columns(
+    dataframe: pd.DataFrame,
+    *,
+    header_row: int,
+    header_row_count: int,
+) -> pd.DataFrame:
+    """Move detached header text onto adjacent unlabeled data columns."""
+
+    header_end = header_row + header_row_count
+    header = dataframe.iloc[header_row:header_end]
+    data = dataframe.iloc[header_end:]
+
+    def has_content(series: pd.Series) -> bool:
+        return any(
+            not _is_missing(value) and str(value).strip() != ""
+            for value in series.tolist()
+        )
+
+    header_only = [
+        column
+        for column in dataframe.columns
+        if has_content(header[column]) and not has_content(data[column])
+    ]
+    unlabeled_data = [
+        column
+        for column in dataframe.columns
+        if not has_content(header[column]) and has_content(data[column])
+    ]
+    if not header_only or not unlabeled_data:
+        return dataframe
+
+    compacted = dataframe.copy(deep=True)
+    removed = []
+    column_positions = {
+        column: position for position, column in enumerate(dataframe.columns)
+    }
+    for source in header_only:
+        destination = min(
+            unlabeled_data,
+            key=lambda column: (
+                abs(column_positions[column] - column_positions[source]),
+                column_positions[column] > column_positions[source],
+                column_positions[column],
+            ),
+        )
+        for row_position in range(header_row, header_end):
+            value = compacted.at[row_position, source]
+            if _is_missing(value) or not str(value).strip():
+                continue
+            existing = compacted.at[row_position, destination]
+            compacted.at[row_position, destination] = (
+                value
+                if _is_missing(existing) or not str(existing).strip()
+                else f"{existing}\n{value}"
+            )
+        removed.append(source)
+
+    return compacted.drop(columns=removed)
 
 
 def clean_generic_table(
@@ -281,6 +359,11 @@ def clean_generic_table(
 
     if header_row is not None:
         header_end = header_row + header_row_count
+        cleaned = _compact_split_header_columns(
+            cleaned,
+            header_row=header_row,
+            header_row_count=header_row_count,
+        )
         cleaned.columns = _combined_headers(cleaned.iloc[header_row:header_end])
         cleaned = cleaned.iloc[header_end:].copy()
 

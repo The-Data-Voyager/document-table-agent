@@ -19,9 +19,10 @@ High-accuracy profile mode deliberately does not guess unknown layouts. The web
 interface can also scan every page with pdfplumber, or locate tables by a page
 range or searchable title. Generic results distinguish detected PDF grids from
 logical tables stacked inside those grids, support candidate preview and
-multi-page joining, and download raw or cleaned CSV. Pages without extractable
-cell text are identified as OCR candidates; scanned/image-only PDFs still
-require the planned OCR stage.
+multi-page joining, normalize spurious header-only columns when continuation
+pages have a narrower layout, and download raw or cleaned CSV. Pages without
+extractable cell text are identified as OCR candidates; scanned/image-only PDFs
+still require the planned OCR stage.
 
 ## Included profiles
 

@@ -239,6 +239,7 @@ def extract_pdf_table_span(
             pdf_path,
             pages,
             table_index=table_index,
+            normalize_column_layout=True,
         )
 
 
