@@ -80,35 +80,42 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-      .stApp { background: #f7f8f5; }
-      [data-testid="stHeader"] { background: rgba(247, 248, 245, 0.92); }
       .hero {
         padding: 1.6rem 1.8rem;
-        border: 1px solid #dce4dc;
+        border: 1px solid rgba(128, 128, 128, 0.28);
         border-radius: 18px;
-        background: linear-gradient(135deg, #ffffff 0%, #eef5ef 100%);
+        background: rgba(128, 128, 128, 0.06);
+        color: inherit;
         margin-bottom: 1.2rem;
       }
       .hero-kicker {
-        color: #32734b;
+        color: inherit;
+        opacity: 0.78;
         font-size: 0.78rem;
         font-weight: 700;
         letter-spacing: 0.12em;
         text-transform: uppercase;
       }
-      .hero h1 { margin: 0.35rem 0 0.4rem; color: #17251c; }
-      .hero p { color: #526057; margin: 0; max-width: 760px; }
+      .hero h1 { margin: 0.35rem 0 0.4rem; color: inherit; }
+      .hero p {
+        color: inherit;
+        opacity: 0.78;
+        margin: 0;
+        max-width: 760px;
+      }
       div[data-testid="stMetric"] {
-        border: 1px solid #dce4dc;
+        border: 1px solid rgba(128, 128, 128, 0.28);
         border-radius: 14px;
         padding: 0.8rem 1rem;
-        background: #ffffff;
+        background: rgba(128, 128, 128, 0.06);
+        color: inherit;
       }
       div[data-testid="stFileUploader"] {
-        border: 1px solid #dce4dc;
+        border: 1px solid rgba(128, 128, 128, 0.28);
         border-radius: 14px;
         padding: 0.7rem;
-        background: #ffffff;
+        background: rgba(128, 128, 128, 0.06);
+        color: inherit;
       }
     </style>
     """,

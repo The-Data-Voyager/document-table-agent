@@ -9,6 +9,12 @@ def test_web_app_starts_in_its_empty_upload_state():
     assert not app.exception
     assert any("Document Table Agent" in item.value for item in app.markdown)
     assert "Upload a text-based PDF" in app.info[0].value
+    styles = next(
+        item.value for item in app.markdown if ".hero" in item.value
+    )
+    assert "#f7f8f5" not in styles
+    assert "background: #ffffff" not in styles
+    assert "color: inherit" in styles
 
 
 def test_web_components_render_a_processed_document():
