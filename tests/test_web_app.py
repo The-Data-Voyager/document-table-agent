@@ -79,6 +79,40 @@ _render_guided_extractor(
     )
 
 
+def test_guided_cleanup_error_is_contained_and_raw_table_stays_downloadable():
+    sample_pdf = Path(
+        "sample_documents/75788759701752062509.pdf"
+    ).resolve()
+    script = f"""
+from pathlib import Path
+import streamlit as st
+from app.document_service import discover_pdf_tables_by_page
+from app import web_app
+
+pdf_bytes = Path({str(sample_pdf)!r}).read_bytes()
+st.session_state["guided-discovery-cleanup-error-pages"] = (
+    discover_pdf_tables_by_page(pdf_bytes, start_page=3, end_page=3)
+)
+def fail_cleanup(*args, **kwargs):
+    raise TypeError("simulated mixed header failure")
+web_app.clean_generic_table = fail_cleanup
+web_app._render_guided_extractor(
+    pdf_bytes,
+    "cleanup-error",
+    "Page or page range",
+)
+"""
+
+    app = AppTest.from_string(script).run(timeout=30)
+
+    assert not app.exception
+    assert any("could not be prepared" in item.value for item in app.error)
+    assert any(
+        item.label == "Download raw table"
+        for item in app.get("download_button")
+    )
+
+
 def test_automatic_discovery_explains_grid_and_logical_table_counts():
     sample_pdf = next(
         path.resolve()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -48,6 +49,9 @@ from app.extraction.generic_extractor import (
     split_table_sections,
     suggest_header_rows,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 PROFILE_LABELS = {
@@ -1049,15 +1053,35 @@ def _render_guided_extractor(
             "pdfplumber emitted as sparse extra rows."
         ),
     )
-    cleaned_table = clean_generic_table(
-        raw_table,
-        header_row=header_row,
-        header_row_count=header_row_count,
-        drop_empty=drop_empty,
-        remove_devanagari=remove_devanagari,
-        remove_repeated_headers=remove_repeated_headers,
-        merge_continuation_rows=merge_continuation_rows,
-    )
+    try:
+        cleaned_table = clean_generic_table(
+            raw_table,
+            header_row=header_row,
+            header_row_count=header_row_count,
+            drop_empty=drop_empty,
+            remove_devanagari=remove_devanagari,
+            remove_repeated_headers=remove_repeated_headers,
+            merge_continuation_rows=merge_continuation_rows,
+        )
+    except Exception as error:
+        LOGGER.exception("Guided table cleanup failed")
+        st.error(
+            "This table could not be prepared with the selected header and "
+            "cleanup settings. The rest of the app is still available."
+        )
+        if isinstance(error, (TypeError, ValueError)):
+            st.caption(f"{type(error).__name__}: {error}")
+        st.info(
+            "Try a different header row/count or download the raw table and "
+            "correct it outside the app."
+        )
+        st.download_button(
+            "Download raw table",
+            data=raw_table.to_csv(index=False, header=False).encode("utf-8-sig"),
+            file_name="selected_table_raw.csv",
+            mime="text/csv",
+        )
+        return
 
     raw_tab, clean_tab, correction_tab, question_tab, chart_tab, download_tab = st.tabs(
         ("Raw layout", "Clean preview", "Correct", "Ask", "Charts", "Downloads")

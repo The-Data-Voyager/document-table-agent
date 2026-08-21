@@ -238,7 +238,10 @@ def suggest_header_rows(dataframe: pd.DataFrame) -> tuple[int, ...]:
 
 
 def _combined_headers(header_block: pd.DataFrame) -> list[str]:
-    grouped = header_block.copy(deep=True)
+    # Header reconstruction intentionally mixes text propagated from merged
+    # cells with numeric-looking labels such as years. Use object dtype so
+    # pandas never attempts to coerce a forwarded string into a float column.
+    grouped = header_block.astype(object).copy(deep=True)
     for row_position in range(len(grouped)):
         populated = sum(
             not _is_missing(value) and str(value).strip() != ""

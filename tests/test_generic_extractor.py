@@ -259,6 +259,29 @@ def test_generic_cleanup_reconstructs_bilingual_multirow_header():
     )
 
 
+def test_multirow_header_forward_fill_accepts_numeric_typed_column():
+    raw = pd.DataFrame(
+        {
+            0: ["Group", "State", "Assam"],
+            1: pd.Series([None, 2026.0, 1.0], dtype="float64"),
+            2: ["Metric", "Cases", "10"],
+        }
+    )
+
+    cleaned = clean_generic_table(
+        raw,
+        header_row=0,
+        header_row_count=2,
+    )
+
+    assert cleaned.columns.tolist() == [
+        "Group | State",
+        "Group | 2026.0",
+        "Metric | Cases",
+    ]
+    assert cleaned.iloc[0].tolist() == ["Assam", 1.0, "10"]
+
+
 def test_generic_extractor_splits_vertically_stacked_page_tables():
     electricity_pdf = next(
         path
